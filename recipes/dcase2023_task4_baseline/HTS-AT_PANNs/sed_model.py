@@ -89,7 +89,7 @@ class SEDWrapper(pl.LightningModule):
                         clip: np.ndarray, 
                         threshold=0.5):
         audios = []
-        y = clip.numpy().astype(np.float32)
+        y = clip.cpu().numpy().astype(np.float32)
         len_y = len(y)
     
         start = 0
@@ -173,8 +173,8 @@ class SEDWrapper(pl.LightningModule):
                                 #print(estimated_event)
                                 break
         
-        prediction_df = pd.DataFrame(estimated_event_list).drop_duplicates()
-        return prediction_df
+        #prediction_df = pd.DataFrame(estimated_event_list).drop_duplicates()
+        #return prediction_df
 
 ## MAke a function called prediction for clip
     
@@ -186,7 +186,7 @@ class SEDWrapper(pl.LightningModule):
         unique_audio_id = test_df.filename.unique()
 
         #warnings.filterwarnings("ignore")
-        prediction_dfs = []
+        #prediction_dfs = []
         for filename in unique_audio_id:
             clip, _ = torchaudio.load(os.path.join(test_audio_dir, filename))
             #Need to change the code!!
@@ -302,6 +302,7 @@ class SEDWrapper(pl.LightningModule):
         return output_dict
 
     def training_step(self, batch, batch_idx):
+        #print("In training step")
         self.device_type = next(self.parameters()).device
         ##if self.config.dataset_type == "audioset":
         ##mix_lambda = torch.from_numpy(get_mix_lambda(0.5, len(batch["waveform"]))).to(self.device_type)
@@ -312,12 +313,17 @@ class SEDWrapper(pl.LightningModule):
         # so "adding noise" might be better than purly "mix"
         # batch["target_frames"] = do_mixup_label(batch["target_frames"])
         # batch["target_frames"] = do_mixup(batch["target_frames"], mix_lambda)
-
+        #print("Waveform")
+        #print(batch["waveform"].shape)
         pred_clip, pred_frame = self(batch["waveform"], mix_lambda)
+        #print("pred")
+        #print(pred_clip.shape)
+        #print(pred_frame.shape)
         # loss = self.loss_func(pred_clip, batch["target_frames"])
         # pred_frame = pred_frame.float()
-
+        #print("Target")
         target = batch["target_frames"].float()
+        #print(target.shape)
         target_classes = batch["target_classes"]
         loss_frame = self.loss_func(pred_frame, target)
         loss_class = self.class_loss_func(pred_clip, target_classes)
@@ -334,19 +340,27 @@ class SEDWrapper(pl.LightningModule):
     # self.dataset.generate_queue()
 
     def validation_step(self, batch, batch_idx):
+        #print("in validation")
+        #print("Waveform")
+        #print(batch["waveform"].shape)
         pred_clip, pred_frame = self(batch["waveform"])
+        #print("Pred")
+        #print(pred_clip.shape)
+        #print(pred_frame.shape)
         target = batch["target_frames"].float()
+        #print("Target")
+        #print(target.shape)
         target_classes = batch["target_classes"].float()
         loss_frame = self.loss_func(pred_frame, target)
         loss_class = self.class_loss_func(pred_clip, target_classes)
         loss = loss_frame + loss_class
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
 
-        for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
+        """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
             prediction_df = self.prediction_for_clip(os.path.basename(filename),
                                                 clip=waveform,
                                                 threshold=0.5)
-            self.prediction_dfs.append(prediction_df)
+            self.prediction_dfs.append(prediction_df)"""
         # self.log()
         # pred_target_dict = {"pred" : [pred_clip.detach(), pred_frame.detach()], "target": [batch["target_classes"].detach(), batch["target_frames"].detach()] }
         return [
@@ -453,17 +467,17 @@ class SEDWrapper(pl.LightningModule):
                 "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
             )
             self.df_eval["event_label"] = self.df_eval["event_label"].map(config.id2classes)
-            self.prediction_dfs = self.prediction_dfs[0]
-            #print(self.prediction_dfs)
+            """self.prediction_dfs = self.prediction_dfs[0]
+            print(self.prediction_dfs)
             print("********************")
             print(self.df_eval)
             event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_eval)
             class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
             class_wise_f_measure = round(class_wise_f_measure, 2)
-            #print(class_wise_f_measure)
+            print(class_wise_f_measure)
             overall_wise_f_measure = event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100
             overall_wise_f_measure = round(overall_wise_f_measure, 2)
-            #print(overall_wise_f_measure)
+            print(overall_wise_f_measure)
             self.log("class-wise-f_measure", class_wise_f_measure, 
                 on_epoch=True,
                 prog_bar=True,
@@ -474,7 +488,7 @@ class SEDWrapper(pl.LightningModule):
                 sync_dist=False,)
             self.df_eval["event_label"] = self.df_eval["event_label"].map(config.classes2id)
             
-            self.prediction_dfs = []
+            self.prediction_dfs = []"""
             """df_cm = pd.DataFrame(metric_dict["confusion_matrix"].numpy(), index = range(10), columns=range(10))
                 plt.figure(figsize = (10,7))
                 fig_ = sns.heatmap(df_cm, annot=True, cmap='Spectral').get_figure()
@@ -506,11 +520,11 @@ class SEDWrapper(pl.LightningModule):
             batch["waveform"] = self.time_shifting(
                 batch["waveform"], shift_len=100 * (i + 1)
             )
-        for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
+        """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
             prediction_df = self.prediction_for_clip(os.path.basename(filename),
                                                 clip=waveform,
                                                 threshold=0.5)
-            self.prediction_dfs.append(prediction_df)
+            self.prediction_dfs.append(prediction_df)"""
         
 
         # preds = torch.cat(preds, dim=0)
@@ -547,9 +561,9 @@ class SEDWrapper(pl.LightningModule):
         # print(pred.shape)
         # print(target.shape)
         #self.df_test["event_label"] = self.df_test["event_label"].map(config.id2classes)
-        self.prediction_dfs = self.prediction_dfs[0]
+        ##self.prediction_dfs = self.prediction_dfs[0]
         self.df_test["event_label"] = self.df_test["event_label"].map(config.id2classes)
-        event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_test)
+        """event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_test)
         class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
         class_wise_f_measure = round(class_wise_f_measure, 2)
         #print(class_wise_f_measure)
@@ -564,7 +578,7 @@ class SEDWrapper(pl.LightningModule):
                 prog_bar=True,
                 sync_dist=False,)
         #print("Event-based metric class-wise average metrics (macro average) {:.2f}%".format(event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100))
-        #print("Event-based metric overall metrics (micro average) {:.2f}%".format(event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100))
+        #print("Event-based metric overall metrics (micro average) {:.2f}%".format(event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100))"""
 
         """if self.config.fl_local:
             pred = np.concatenate([d[0] for d in test_step_outputs], axis = 0)
