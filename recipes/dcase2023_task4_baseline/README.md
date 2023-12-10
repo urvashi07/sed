@@ -408,3 +408,9 @@ As in the [SED baseline][sed_baseline], resuming training, testing from checkpoi
 [9] Bilen, Cagdas, et al. "A framework for the robust evaluation of sound event detection." arXiv preprint arXiv:1910.08440 (ICASSP 2020)
 
 [10] Ebbers, Janek, et al. "Threshold-independent evaluation of sound event detection scores." arXiv preprint arXiv:2201.13148 (ICASSP 2022)
+
+### Github issue
+You may also need to update the origin for your repository if it is set to HTTPS. Do this to switch to SSH:
+
+git remote -v
+git remote set-url origin git@github.com:USERNAME/REPONAME.git
