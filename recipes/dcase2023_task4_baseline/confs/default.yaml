@@ -25,7 +25,7 @@ training:
   precision: 32
   enable_progress_bar: True
   reduce_dataset_size: False
-  max_epoch: 50
+  max_epoch: 100
   batch_size: 16
   random_seed: 2023
 scaler:

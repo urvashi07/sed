@@ -9,6 +9,7 @@ import torchaudio
 import multiprocessing as mp
 import tqdm
 from tqdm.contrib.concurrent import process_map  # or thread_map
+import yaml
 
 
 def resample(audio, orig_fs, target_fs=16000):
@@ -78,10 +79,39 @@ def _worker_func(input_args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Resample a folder recursively")
-    parser.add_argument("--in_dir", type=str)
-    parser.add_argument("--out_dir", type=str)
-    parser.add_argument("--target_fs", default=16000)
     parser.add_argument("--regex", type=str, default="*.wav")
+    conf_file_path = "/home/unegi2s/Documents/sed_github/sed/recipes/dcase2023_task4_baseline/confs/default.yaml"
 
-    args = parser.parse_args()
-    resample_folder(args.in_dir, args.out_dir, int(args.target_fs), args.regex)
+    with open(conf_file_path, "r") as f:
+        configs = yaml.safe_load(f)
+
+    dsets = [
+            "unlabeled_folder"
+
+        ]
+    
+    """dsets = [
+            "synth_folder",
+            "synth_val_folder",
+            "strong_folder", #
+            "weak_folder", #
+            "unlabeled_folder", #
+            "test_folder",
+            "eval_folder"
+        ]"""
+    
+    
+    target_fs = configs["data"]["fs"]
+
+    for dset in dsets:
+        in_dir = os.path.join(configs["data"]["prefix_folder"], 
+        configs["data"][dset + "_44k"])
+        out_dir = os.path.join(configs["data"]["prefix_folder"], 
+        configs["data"][dset])
+
+        if not os.path.exists(out_dir):
+            os.mkdir(out_dir)
+
+        computed = resample_folder(
+            in_dir, out_dir, target_fs=target_fs
+        )
