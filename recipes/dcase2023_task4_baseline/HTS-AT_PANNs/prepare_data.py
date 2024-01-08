@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import config
 import yaml
+import sys
 
 
 @dataclass
@@ -71,10 +72,15 @@ def convert_to_list_dataclass(event_dict, audio_dir_path, data_type):
     return audio_data_list
 
 
-def prepare_data(path, audio_path, data_type):
+def prepare_data(path, audio_path, data_type, data):
     df = read_csv(path)
+    
     event_dict = get_file_info(df)
     list_audio_info = convert_to_list_dataclass(event_dict, audio_path, data_type)
+    """if data == "eval-strong":
+        print(df)
+        print(list_audio_info[:10])
+        sys.exit()"""
     return list_audio_info
 
 
@@ -83,18 +89,21 @@ def prepare_all_data(config):
     list_audio_info_strong = prepare_data(
         path=os.path.join(config["prefix_folder"], config["strong_tsv"]),
         audio_path=os.path.join(config["prefix_folder"], config["strong_folder"]),
-        data_type="strong"
+        data_type="strong",
+        data = "train-strong"
     )
     list_audio_info_synth = prepare_data(
         path=os.path.join(config["prefix_folder"], config["synth_tsv"]),
         audio_path=os.path.join(config["prefix_folder"], config["synth_folder"]),
-        data_type="strong"
+        data_type="strong",
+        data = "train-synth"
     )
 
     list_audio_info_weak = prepare_data(
         path=os.path.join(config["prefix_folder"], config["weak_tsv"]),
         audio_path=os.path.join(config["prefix_folder"], config["weak_folder"]),
-        data_type="weak"
+        data_type="weak",
+        data = "train-weak"
     )
 
 
@@ -102,15 +111,22 @@ def prepare_all_data(config):
     list_audio_info_eval_strong = prepare_data(
         path=os.path.join(config["prefix_folder"], config["val_tsv"]),
         audio_path=os.path.join(config["prefix_folder"], config["val_folder"]),
-        data_type="strong"
+        data_type="strong",
+        data = "eval-strong"
     )
     list_audio_info_eval_synth = prepare_data(
         path=os.path.join(config["prefix_folder"], config["synth_val_tsv"]),
-        audio_path=os.path.join(config["prefix_folder"], config["val_folder"]),
-        data_type="strong"
+        audio_path=os.path.join(config["prefix_folder"], config["synth_val_folder"]),
+        data_type="strong",
+        data = "eval-synth"
     )
 
-
+    list_audio_info_eval_weak = prepare_data(
+        path=os.path.join(config["prefix_folder"], config["weak_tsv"]),
+        audio_path=os.path.join(config["prefix_folder"], config["weak_folder"]),
+        data_type="weak",
+        data = "eval-weak"
+    )
 
     return {
         "train": {
@@ -121,6 +137,7 @@ def prepare_all_data(config):
         "eval": {
             "strong": list_audio_info_eval_strong,
             "synth": list_audio_info_eval_synth,
+            "weak": list_audio_info_eval_weak
         },
     }
 

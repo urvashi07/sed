@@ -14,6 +14,7 @@ from numpy.lib.function_base import average
 from pathlib import Path
 from sklearn import metrics
 import soundfile as sf
+from inference import batched_decode_preds
 from sklearn.metrics import (
     average_precision_score,
     roc_auc_score,
@@ -32,6 +33,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from torchmetrics.classification import MulticlassConfusionMatrix
 import config
+
+from desed_task.evaluation.evaluation_measures import (
+    compute_per_intersection_macro_f1,
+    compute_psds_from_operating_points,
+)
 
 
 from utils import get_loss_func, get_mix_lambda, d_prime
@@ -54,6 +60,7 @@ from torch import tensor
 from torchmetrics.functional import f1_score
 import torchmetrics
 from tqdm import tqdm
+import yaml
 
 from torchcontrib.optim import SWA
 
@@ -64,32 +71,36 @@ def frame_to_time(frame):
 
 
 class SEDWrapper(pl.LightningModule):
-    def __init__(self, sed_model, config, df_eval, df_test, prefix_folder):
+    def __init__(self, sed_model, config, prefix_folder):
         super().__init__()
         self.sed_model = sed_model
         self.config = config
         # self.dataset = dataset
-        self.loss_func = get_loss_func(config.loss_type)
+        self.frame_loss_func = get_loss_func(config.loss_type_frame)
         self.class_loss_func = get_loss_func(config.loss_type_class)
         self.writer = SummaryWriter()
         self.learning_rate = config.learning_rate
         print(self.device)
-        self.f1_score = torchmetrics.classification.f_beta.MultilabelF1Score(
-            10, average="macro"
+        self.get_weak_f1_seg_macro = torchmetrics.classification.f_beta.MultilabelF1Score(
+            len(self.config.classes2id), average="macro"
         ).to(self.device)
-        self.df_eval = df_eval
-        self.df_test = df_test
+        #self.df_eval = df_eval
+        #self.df_test = df_test
         self.prefix_folder = prefix_folder
-        self.filename_eval = self.df_eval.filename.unique()
-        self.filename_test = self.df_test.filename.unique()
+        #self.filename_eval = self.df_eval.filename.unique()
+        #self.filename_test = self.df_test.filename.unique()
         self.prediction_dfs = []
+        conf_file_path = "/home/unegi/Documents/dcase2023_task4_gitlab/DESED_task/recipes/dcase2023_task4_baseline/confs/default.yaml"
+        with open(conf_file_path, "r") as f:
+            self.configs = yaml.safe_load(f)
+        # for weak labels we simply compute f1 score
     
     def prediction_for_clip(self,
                             filename,
                         clip: np.ndarray, 
                         threshold=0.5):
         audios = []
-        y = clip.cpu().numpy().astype(np.float32)
+        y = clip.numpy().astype(np.float32)
         len_y = len(y)
     
         start = 0
@@ -173,8 +184,8 @@ class SEDWrapper(pl.LightningModule):
                                 #print(estimated_event)
                                 break
         
-        #prediction_df = pd.DataFrame(estimated_event_list).drop_duplicates()
-        #return prediction_df
+        prediction_df = pd.DataFrame(estimated_event_list).drop_duplicates()
+        return prediction_df
 
 ## MAke a function called prediction for clip
     
@@ -186,7 +197,7 @@ class SEDWrapper(pl.LightningModule):
         unique_audio_id = test_df.filename.unique()
 
         #warnings.filterwarnings("ignore")
-        #prediction_dfs = []
+        prediction_dfs = []
         for filename in unique_audio_id:
             clip, _ = torchaudio.load(os.path.join(test_audio_dir, filename))
             #Need to change the code!!
@@ -212,8 +223,8 @@ class SEDWrapper(pl.LightningModule):
 
         pred_class = pred[0]
         pred_frame = pred[1]
-        target_class = target[0]
-        target_frame = target[1]
+        target = target[0]
+        #target_frame = target[1]
 
         if self.config.dataset_type == "audioset":
             """flat_ans = ans.flatten()
@@ -223,22 +234,22 @@ class SEDWrapper(pl.LightningModule):
             # ans = ans.astype(np.float32)
             pred_class = pred_class
             # pred_frame = pred_frame.astype(np.float32)
-            target_class = target_class
+            #target = target_class
             # target_frame = target_frame.astype(np.float32)
 
             reshaped_pred_frame = pred_frame.transpose(0, 2, 1)
-            reshaped_target_frame = target_frame.transpose(0, 2, 1)
+            reshaped_target = target.transpose(0, 2, 1)
             # reshaped_pred_class = pred_class.transpose(1,0)
             # reshaped_target_class = target_class.transpose(1,0)
 
             threshold = 0.5
             predicted_labels = pred_class > threshold
-            reshaped_target_class = target_class
+            #reshaped_target_class = target
             ap_values = []
             auc_scores = []
             f1_scores = []
             for class_idx in range(10):
-                class_target_frame = reshaped_target_frame[:, class_idx, :]
+                class_target_frame = reshaped_target[:, class_idx, :]
                 class_pred_frame = reshaped_pred_frame[:, class_idx, :]
                 ap = average_precision_score(
                     class_target_frame, class_pred_frame, average=None
@@ -252,7 +263,7 @@ class SEDWrapper(pl.LightningModule):
 
             mAP = np.mean(ap_values)
             # mAUC = np.mean(auc_scores)
-            f1 = self.f1_score(predicted_labels, reshaped_target_class).to(self.device)
+            #f1 = self.f1_score(predicted_labels, reshaped_target_class).to(self.device)
 
             # mAP = np.mean(average_precision_score(flat_ans, flat_pred, average = None))
             # mAUC = np.mean(roc_auc_score(flat_ans, flat_pred, average = None))
@@ -282,7 +293,7 @@ class SEDWrapper(pl.LightningModule):
                 "mAUC": mAUC,
                 "dprime": dprime,
                 # "precision": precision, "recall": recall,
-                "f1": f1,
+                #"f1": f1,
             }  # , "confusion_matrix": confusion_matrix}
         else:
             acc = accuracy_score(ans, np.argmax(pred, 1))
@@ -302,34 +313,45 @@ class SEDWrapper(pl.LightningModule):
         return output_dict
 
     def training_step(self, batch, batch_idx):
-        #print("In training step")
+        indx_synth, indx_weak = [4,2]
         self.device_type = next(self.parameters()).device
+        loss_frame = 0
+        loss_class = 0
+        if isinstance(batch, list):
+            indx_synth, indx_weak = [4,2]
+            print(batch)
+            batch_num = len(batch)
+            audio_name, audio, label = batch["audio_name"], batch["waveform"], batch["target"]
+            strong_mask = torch.zeros(batch_num).bool()
+            weak_mask = torch.zeros(batch_num).bool()
+            strong_mask[:indx_synth] = 1
+            weak_mask[indx_synth : indx_weak + indx_synth] = 1
         ##if self.config.dataset_type == "audioset":
         ##mix_lambda = torch.from_numpy(get_mix_lambda(0.5, len(batch["waveform"]))).to(self.device_type)
         # else:
-        mix_lambda = None
+            mix_lambda = None
 
         # Another Choice: also mixup the target, but AudioSet is not a perfect data
         # so "adding noise" might be better than purly "mix"
         # batch["target_frames"] = do_mixup_label(batch["target_frames"])
         # batch["target_frames"] = do_mixup(batch["target_frames"], mix_lambda)
-        #print("Waveform")
-        #print(batch["waveform"].shape)
-        pred_clip, pred_frame = self(batch["waveform"], mix_lambda)
-        #print("pred")
-        #print(pred_clip.shape)
-        #print(pred_frame.shape)
+            pred_clip, pred_frame = self(audio, mix_lambda)
+            print(pred_clip.shape)
+            print(pred_frame.shape)
         # loss = self.loss_func(pred_clip, batch["target_frames"])
         # pred_frame = pred_frame.float()
-        #print("Target")
-        target = batch["target_frames"].float()
-        #print(target.shape)
-        target_classes = batch["target_classes"]
-        loss_frame = self.loss_func(pred_frame, target)
-        loss_class = self.class_loss_func(pred_clip, target_classes)
-        loss = loss_frame + loss_class
-        self.log("train_loss", loss, on_epoch=True, prog_bar=True)
-        return loss
+
+        
+
+            target = batch["target"].float()
+        #target_classes = batch["target_classes"]
+            loss_frame = self.frame_loss_func(pred_frame[strong_mask], target[strong_mask])
+            loss_class = self.class_loss_func(pred_clip[weak_mask], target[weak_mask])
+            loss = loss_frame + loss_class
+            print("................")
+            print(loss)
+            self.log("train_loss", loss, on_epoch=True, prog_bar=True)
+            return loss
 
     # def training_epoch_end(self, outputs):
     # Change: SWA, deprecated
@@ -340,21 +362,68 @@ class SEDWrapper(pl.LightningModule):
     # self.dataset.generate_queue()
 
     def validation_step(self, batch, batch_idx):
-        #print("in validation")
-        #print("Waveform")
-        #print(batch["waveform"].shape)
-        pred_clip, pred_frame = self(batch["waveform"])
-        #print("Pred")
-        #print(pred_clip.shape)
-        #print(pred_frame.shape)
-        target = batch["target_frames"].float()
-        #print("Target")
-        #print(target.shape)
-        target_classes = batch["target_classes"].float()
-        loss_frame = self.loss_func(pred_frame, target)
-        loss_class = self.class_loss_func(pred_clip, target_classes)
-        loss = loss_frame + loss_class
+        print("in validatioj")
+        audio_name, audio, label = batch["audio_name"], batch["waveform"], batch["target"]
+        indx_synth, indx_weak = [6,6]
+        batch_num = len(batch)
+        pred_clip, pred_frame = self(audio)
+        strong_mask = torch.zeros(batch_num).bool()
+        weak_mask = torch.zeros(batch_num).bool()
+        strong_mask[:indx_synth] = 1
+        weak_mask[indx_synth : indx_weak + indx_synth] = 1
+        print("validation prediction")
+        print(pred_clip.shape)
+        print(pred_frame.shape)
+        target = label.float()
+        #target_classes = batch["target_classes"].float()
+        loss_frame = self.frame_loss_func(pred_frame, target)
+        #loss_class = self.class_loss_func(pred_clip, target_classes)
+        loss = loss_frame# + loss_class
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
+        mask_weak = (
+            torch.tensor(
+                [
+                    str(Path(x).parent)
+                    == str(Path(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["weak_folder"])))
+                    for x in batch["audio_name"]
+                ]
+            )
+            .to(batch["waveform"])
+            .bool()
+        )
+        print(batch_num)
+
+        mask_synth = (
+            torch.tensor(
+                [
+                    str(Path(x).parent)
+                    == str(Path(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_folder"])))
+                    for x in  batch["audio_name"]
+                ]
+            )
+            .to(batch["waveform"])
+            .bool()
+        )
+        print(mask_weak)
+        print(pred_clip[mask_weak])
+        # accumulate f1 score for weak labels
+        if not pred_clip[mask_weak].numel() == 0:
+            self.get_weak_f1_seg_macro(
+                pred_clip[weak_mask], target[weak_mask].long()
+            )
+
+        filenames_synth = [
+                x
+                for x in audio_name
+                if Path(x).parent == Path(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_folder"]))
+            ]
+        decoded_strong = batched_decode_preds(
+        pred_frame, filenames_synth, thresholds=0.5, median_filter=7, pad_indx=None,
+        hop_length = self.configs["feats"]["hop_length"], sr = self.configs["feats"]["sample_rate"]
+        )
+        print("decoded")
+        print(decoded_strong)
+
 
         """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
             prediction_df = self.prediction_for_clip(os.path.basename(filename),
@@ -366,18 +435,19 @@ class SEDWrapper(pl.LightningModule):
         return [
             pred_clip.detach(),
             pred_frame.detach(),
-            batch["target_classes"].detach(),
-            batch["target_frames"].detach(),
+            batch["target"].detach(),
+            #batch["target_frames"].detach(),
         ]
 
     def validation_epoch_end(self, validation_step_outputs):
+        weak_f1_macro = self.get_weak_f1_seg_macro.compute()
         self.device_type = next(self.parameters()).device
 
         # print(target.shape)
         pred_classes = torch.cat([d[0] for d in validation_step_outputs], dim=0)
         pred_frame = torch.cat([d[1] for d in validation_step_outputs], dim=0)
-        target_classes = torch.cat([d[2] for d in validation_step_outputs], dim=0)
-        target_frame = torch.cat([d[3] for d in validation_step_outputs], dim=0)
+        target = torch.cat([d[2] for d in validation_step_outputs], dim=0)
+        #target_frame = torch.cat([d[3] for d in validation_step_outputs], dim=0)
 
         if torch.cuda.device_count() > 1:
             gather_pred_classes = [
@@ -386,11 +456,11 @@ class SEDWrapper(pl.LightningModule):
             gather_pred_frame = [
                 torch.zeros_like(pred_frame) for _ in range(dist.get_world_size())
             ]
-            gather_target_classes = [
-                torch.zeros_like(target_classes) for _ in range(dist.get_world_size())
-            ]
+            #gather_target_classes = [
+            #    torch.zeros_like(target_classes) for _ in range(dist.get_world_size())
+            #]
             gather_target_frame = [
-                torch.zeros_like(target_frame) for _ in range(dist.get_world_size())
+                torch.zeros_like(target) for _ in range(dist.get_world_size())
             ]
             dist.barrier()
 
@@ -428,10 +498,10 @@ class SEDWrapper(pl.LightningModule):
         else:"""
         gather_pred_classes = pred_classes
         gather_pred_frame = pred_frame.cpu().numpy()
-        gather_target_classes = target_classes
-        gather_target_frame = target_frame.cpu().numpy()
+        #gather_target_classes = target_classes
+        gather_target = target.cpu().numpy()
         if self.config.dataset_type == "scv2":
-            gather_target = np.argmax(gather_target_classes, 1)
+            gather_target = np.argmax(gather_target, 1)
             metric_dict = self.evaluate_metric(
                 gather_pred_classes, gather_target_classes
             )
@@ -439,7 +509,7 @@ class SEDWrapper(pl.LightningModule):
 
         pred_target_dict = {
             "pred": [gather_pred_classes, gather_pred_frame],
-            "target": [gather_target_classes, gather_target_frame],
+            "target": [gather_target],
         }
 
         if self.config.dataset_type == "audioset":
@@ -463,22 +533,22 @@ class SEDWrapper(pl.LightningModule):
             )"""
             # self.log("precision", metric_dict["precision"], on_epoch = True, prog_bar=True, sync_dist=False)
             # self.log("recall", metric_dict["recall"], on_epoch = True, prog_bar=True, sync_dist=False)
-            self.log(
-                "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
-            )
-            self.df_eval["event_label"] = self.df_eval["event_label"].map(config.id2classes)
-            """self.prediction_dfs = self.prediction_dfs[0]
-            print(self.prediction_dfs)
-            print("********************")
-            print(self.df_eval)
-            event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_eval)
-            class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
-            class_wise_f_measure = round(class_wise_f_measure, 2)
-            print(class_wise_f_measure)
-            overall_wise_f_measure = event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100
-            overall_wise_f_measure = round(overall_wise_f_measure, 2)
-            print(overall_wise_f_measure)
-            self.log("class-wise-f_measure", class_wise_f_measure, 
+            #self.log(
+            #    "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
+            #)
+            #self.df_eval["event_label"] = self.df_eval["event_label"].map(config.id2classes)
+            #self.prediction_dfs = self.prediction_dfs[0]
+            #print(self.prediction_dfs)
+            #print("********************")
+            #print(self.df_eval)
+            ##event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_eval)
+            ##class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
+            ##class_wise_f_measure = round(class_wise_f_measure, 2)
+            #print(class_wise_f_measure)
+            ##overall_wise_f_measure = event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100
+            ##overall_wise_f_measure = round(overall_wise_f_measure, 2)
+            #print(overall_wise_f_measure)
+            """self.log("class-wise-f_measure", class_wise_f_measure, 
                 on_epoch=True,
                 prog_bar=True,
                 sync_dist=False)
@@ -486,9 +556,9 @@ class SEDWrapper(pl.LightningModule):
                 on_epoch=True,
                 prog_bar=True,
                 sync_dist=False,)
-            self.df_eval["event_label"] = self.df_eval["event_label"].map(config.classes2id)
+            ##self.df_eval["event_label"] = self.df_eval["event_label"].map(config.classes2id)"""
             
-            self.prediction_dfs = []"""
+            self.prediction_dfs = []
             """df_cm = pd.DataFrame(metric_dict["confusion_matrix"].numpy(), index = range(10), columns=range(10))
                 plt.figure(figsize = (10,7))
                 fig_ = sns.heatmap(df_cm, annot=True, cmap='Spectral').get_figure()
@@ -499,6 +569,7 @@ class SEDWrapper(pl.LightningModule):
             self.log(
                 "acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=False
             )
+        self.get_weak_f1_seg_macro.reset()
 
     def time_shifting(self, x, shift_len):
         shift_len = int(shift_len)
@@ -542,8 +613,8 @@ class SEDWrapper(pl.LightningModule):
         return [
             pred_clip.detach().detach(),
             pred_frame.detach(),
-            batch["target_classes"].detach(),
-            batch["target_frames"].detach(),
+            batch["target"].detach(),
+            #batch["target_frames"].detach(),
         ]
 
     def test_epoch_end(self, test_step_outputs):
@@ -554,22 +625,22 @@ class SEDWrapper(pl.LightningModule):
 
         pred_classes = torch.cat([d[0] for d in test_step_outputs], dim=0)
         pred_frame = torch.cat([d[1] for d in test_step_outputs], dim=0)
-        target_classes = torch.cat([d[2] for d in test_step_outputs], dim=0)
-        target_frame = torch.cat([d[3] for d in test_step_outputs], dim=0)
+        target = torch.cat([d[2] for d in test_step_outputs], dim=0)
+        #target_frame = torch.cat([d[3] for d in test_step_outputs], dim=0)
 
         # print("=====================================")
         # print(pred.shape)
         # print(target.shape)
         #self.df_test["event_label"] = self.df_test["event_label"].map(config.id2classes)
-        ##self.prediction_dfs = self.prediction_dfs[0]
-        self.df_test["event_label"] = self.df_test["event_label"].map(config.id2classes)
-        """event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_test)
-        class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
-        class_wise_f_measure = round(class_wise_f_measure, 2)
+        #self.prediction_dfs = self.prediction_dfs[0]
+        #self.df_test["event_label"] = self.df_test["event_label"].map(config.id2classes)
+        #event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_test)
+        ##class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
+        ##class_wise_f_measure = round(class_wise_f_measure, 2)
         #print(class_wise_f_measure)
-        overall_wise_f_measure = event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100
-        overall_wise_f_measure = round(overall_wise_f_measure, 2)
-        self.log("class-wise-f_measure", class_wise_f_measure, 
+        ##overall_wise_f_measure = event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100
+        ##overall_wise_f_measure = round(overall_wise_f_measure, 2)
+        """self.log("class-wise-f_measure", class_wise_f_measure, 
                 on_epoch=True,
                 prog_bar=True,
                 sync_dist=False)
@@ -629,11 +700,12 @@ class SEDWrapper(pl.LightningModule):
             # self.log("mAP", metric_dict["mAP"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             gather_pred_classes = pred_classes
             gather_pred_frame = pred_frame.cpu().numpy()
-            gather_target_classes = target_classes
-            gather_target_frame = target_frame.cpu().numpy()
+            gather_target = target.cpu().numpy()
+            #gather_target_classes = target_classes
+            #gather_target_frame = target_frame.cpu().numpy()
             pred_target_dict = {
                 "pred": [gather_pred_classes, gather_pred_frame],
-                "target": [gather_target_classes, gather_target_frame],
+                "target": [gather_target],
             }
 
             metric_dict = self.evaluate_metric(pred_target_dict)
@@ -654,9 +726,9 @@ class SEDWrapper(pl.LightningModule):
             )"""
             # self.log("precision", metric_dict["precision"], on_epoch = True, prog_bar=True, sync_dist=False)
             # self.log("recall", metric_dict["recall"], on_epoch = True, prog_bar=True, sync_dist=False)
-            self.log(
-                "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
-            )
+            #self.log(
+            #    "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
+            #)
             # self.log.tb_writer.add_image('Confusion Matrix', metric_dict["confusion_mat"], global_step=self.global_step)
             # self.log("mAUC", metric_dict["mAUC"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             # self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
@@ -853,13 +925,13 @@ class Ensemble_SEDWrapper(pl.LightningModule):
                 )"""
                 # self.log("precision", metric_dict["precision"], on_epoch = True, prog_bar=True, sync_dist=False)
                 # self.log("recall", metric_dict["recall"], on_epoch = True, prog_bar=True, sync_dist=False)
-                self.log(
+                """self.log(
                     "f1",
                     metric_dict["f1"],
                     on_epoch=True,
                     prog_bar=True,
                     sync_dist=False,
-                )
+                )"""
                 # self.log("mAUC", metric_dict["mAUC"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
                 # self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             else:

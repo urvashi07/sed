@@ -9,17 +9,17 @@ import torch.nn as nn
 import logging
 import config
 import random
+from torchlibrosa.stft import Spectrogram, LogmelFilterBank
 
 
 class SEDDataset(Dataset):
     def __init__(
         self,
-        annotations_file,
-        audio_dir,
         transformation,
         target_sample_rate,
+        config,
         num_samples,
-        label_column,
+        list_audio_info,
         device,
     ):
         """
@@ -29,23 +29,38 @@ class SEDDataset(Dataset):
            config: the config.py module
            eval_model (bool): to indicate if the dataset is a testing dataset
         """
-        self.annotations = pd.read_csv(annotations_file, sep="\t")
-        self.audio_dir = audio_dir
+        # self.annotations = pd.read_csv(annotations_file ,sep = "\t")
+        # self.audio_dir = audio_dir
         self.device = device
         self.waveform_transforms = False
         if transformation is not None:
             self.transformation = transformation.to(self.device)
         else:
             self.transformation = None
+        self.list_audio_info = list_audio_info
+        # self.filenames = list(self.df["filename"].unique())
         self.target_sample_rate = target_sample_rate
+        self.net_pooling = 1
         self.num_samples = num_samples
-        self.classes_num = config.classes_num
-        print(self.classes_num)
-        self.label_column = label_column
-        total_size = len(self.annotations)
+        self.configs = config
+        self.classes_num = self.configs["classes_num"]
+        # print(self.classes_num)
+        # self.frame_hop = hop_length
+        self.max_audio_duration = self.configs["feats"]["max_audio_duration"]
+        self.sr = self.configs["feats"]["sample_rate"]
+        self.hop_length = self.configs["feats"]["hop_length"]
+        # total_size = len(self.annotations)
+        self.audio_len = 10
+        self.fmin = self.configs["feats"]["f_min"]
+        self.fmax = self.configs["feats"]["f_max"]
+        self.window_size = self.configs["feats"]["n_window"]
+        self.mel_bins = self.configs["feats"]["n_mels"]
+        n_frames = self.audio_len * self.num_samples
+        self.n_frames = int(int((n_frames / self.hop_length)) / self.net_pooling)
+        # logging.info("total dataset size: %d" %(total_size))
+        logging.info("class num: %d" % (self.configs["classes_num"]))
+        # self.event_dict = event_dict
 
-        logging.info("total dataset size: %d" % (total_size))
-        logging.info("class num: %d" % (self.classes_num))
 
     def time_shifting(self, x):
         frame_num = len(x)
@@ -54,9 +69,21 @@ class SEDDataset(Dataset):
         return new_sample
 
     def crop_wav(self, x):
-        crop_size = self.config.crop_size
+        crop_size = self.configs["feats"]["crop_size"]
         crop_pos = random.randint(0, len(x) - crop_size - 1)
         return x[crop_pos : crop_pos + crop_size]
+
+    def time_to_frame(self, time):
+        return (self.sr * time) / self.hop_length
+
+    """def _time_to_frame(self, time):
+        #samples = time * self.num_samples
+        #frame = ((samples) / self.frame_hop) - 1
+        frame = time * config.htsat_spec_size * self.freq_ratio
+        return np.clip(frame / self.net_pooling, a_min=0, a_max=self.n_frames)"""
+
+    def frame_to_time(self, frame):
+        return (frame * self.hop_length) / self.sr
 
     def __getitem__(self, index):
         """Load waveform and target of an audio clip.
@@ -70,85 +97,77 @@ class SEDDataset(Dataset):
             "target": (classes_num,)
         }
         """
-        audio_sample_path = self._get_audio_sample_path(index)
-        # print(audio_sample_path)
-        label = self._get_audio_sample_label(index)
-        # print(label)
-        labels_list = []
-        labels_list_int = []
-        if self.label_column == "event_labels":
-            labels_list = label.split(",")
-            for lbl in labels_list:
-                lbl_int = config.classes2id[lbl]
-                labels_list_int.append(lbl_int)
-        else:
-            label_int = config.classes2id[label]
-        # target = torch.zeros(self.classes_num)  # Initialize with zeros
-        # target[label_int] = 1
-        # audio_sample_path = self._get_audio_sample_path(index)
+        filename = self.list_audio_info[index].filename
+        filepath = self.list_audio_info[index].filepath
+        class_labels = self.list_audio_info[index].class_labels
+        waveform, sr = torchaudio.load(filepath)
 
-        # waveform, sr = sf.read(audio_sample_path)
-        # waveform = torch.from_numpy(waveform)
-        waveform, sr = torchaudio.load(audio_sample_path)
-        waveform = self._resample_if_necessary(waveform, sr)
-        waveform = self._mix_down_if_necessary(waveform)
-        if waveform.shape[1] > self.num_samples:
-            waveform = self._cut_if_necessary(waveform, 0.1, 10)
+        # tmp_data = np.array(self.event_dict[filename]).T
+        class_int = class_labels.astype(int)
+        if waveform.shape[0] > 1:
+            waveform = self._mix_down_if_necessary(waveform)
+        if not waveform.shape[1] == self.target_sample_rate:
+            waveform = self._resample_if_necessary(waveform, sr)
 
+        waveform = self._cut_if_necessary(waveform, 0, 10)
         waveform = self._right_pad_if_necessary(waveform)
         waveform = waveform.view(-1)
 
-        if self.transformation is not None:
-            waveform = self.transformation(waveform)
+        labels_arr = np.zeros(self.classes_num)
 
-        labels = np.zeros(self.classes_num, dtype="f")
-        if self.label_column == "event_labels":
-            for lbl in labels_list:
-                labels[config.classes2id[lbl]] = 1
-        else:
-            labels[config.classes2id[label]] = 1
-
+        for ind, val in enumerate(class_labels):
+            labels_arr[val] = 1
         data_dict = {
-            "audio_name": audio_sample_path,
+            "audio_name": filepath,
             "waveform": waveform,
-            "target": labels,
+            "target": torch.tensor(labels_arr),
         }
+        #data_list = [filepath, waveform, torch.tensor(labels_arr)]
         return data_dict
 
     def __len__(self):
-        return len(self.annotations)
+        return len(self.list_audio_info)
+
+    """def _get_onset_time(self, index):
+        column_index = self.annotations.columns.get_loc(self.onset_column)
+        return self.annotations.iloc[index, column_index]
+    
+    def _get_offset_time(self, index):
+        column_index = self.annotations.columns.get_loc(self.offset_column)
+        return self.annotations.iloc[index, column_index]"""
 
     def _get_audio_sample_path(self, index):
         path = os.path.join(self.audio_dir, self.annotations.iloc[index, 0])
         # print(path)
         return path
 
-    def _get_audio_sample_label(self, index):
-        column_index = self.annotations.columns.get_loc(self.label_column)
-        return self.annotations.iloc[index, column_index]
-
     def _cut_if_necessary(self, signal, onset, offset):
-        onset_frame = int(onset * self.target_sample_rate)
-        offset_frame = int(offset * self.target_sample_rate)
-        signal = signal[:, onset_frame:offset_frame]
-
-        if signal.shape[1] > self.num_samples:
-            signal = signal[:, : self.num_samples]
+        # onset_frame = int(onset * self.target_sample_rate)
+        # offset_frame = int(offset * self.target_sample_rate *self.max_audio_duration)
+        # signal = signal[:, onset_frame:offset_frame]
+        max_length = self.sr * self.max_audio_duration
+        if signal.shape[1] > max_length:
+            signal = signal[:, : (self.sr * self.max_audio_duration)]
         return signal
 
     def _right_pad_if_necessary(self, signal):
         length_signal = signal.shape[1]
-        if length_signal < self.num_samples:
-            num_missing_samples = self.num_samples - length_signal
+        max_length = self.sr * self.max_audio_duration
+        if length_signal < max_length:
+            num_missing_samples = max_length - length_signal
             last_dim_padding = (0, num_missing_samples)
             signal = nn.functional.pad(signal, last_dim_padding)
         return signal
 
     def _resample_if_necessary(self, signal, sr):
-        resampler = torchaudio.transforms.Resample(sr, self.target_sample_rate)
+        # resampler = torchaudio.transforms.Resample(sr, self.target_sample_rate)
         if not sr == self.target_sample_rate:
-            signal = resampler(signal)
-        return signal
+            signal1 = torchaudio.functional.resample(
+                signal, orig_freq=sr, new_freq=self.target_sample_rate
+            )
+            return signal1
+        else:
+            return signal
 
     def _mix_down_if_necessary(self, signal):
         if signal.shape[0] > 1:

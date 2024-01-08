@@ -1,6 +1,6 @@
 training:
   #batch size: [synth, weak, unlabel]
-  #batch_size: [12, 12, 24]
+  batch_sizes: [12, 12, 24]
   batch_size_val: 24
   const_max: 2 # max weight used for self supervised loss
   n_epochs_warmup: 50 # num epochs used for exponential warmup
@@ -24,9 +24,9 @@ training:
   obj_metric_synth_type: intersection
   precision: 32
   enable_progress_bar: True
-  reduce_dataset_size: False
-  max_epoch: 100
-  batch_size: 16
+  reduce_dataset_size: True
+  max_epoch: 75
+  batch_size: 64
   random_seed: 2023
 scaler:
   statistic: instance # instance or dataset-wide statistic
@@ -36,7 +36,7 @@ scaler:
 data: # change with your paths if different.
   # NOTE: if you have data in 44kHz only then synth_folder will be the path where
   # resampled data will be placed.
-  prefix_folder: "/scratch/unegi2s"
+  prefix_folder: "/nm-raid/audio/work/unegi"
   synth_folder: "data/dcase/dataset/dcase_synth/audio/train/synthetic21_train/soundscapes_16k/"
   synth_folder_44k: "data/dcase/dataset/dcase_synth/audio/train/synthetic21_train/soundscapes/"
   synth_tsv:  "data/dcase/dataset/dcase_synth/metadata/train/synthetic21_train/soundscapes.tsv"
@@ -48,7 +48,7 @@ data: # change with your paths if different.
   weak_tsv: "data/dcase/dataset/metadata/train/weak.tsv"
   unlabeled_folder: "data/dcase/dataset/audio/train/unlabel_in_domain_16k/"
   unlabeled_folder_44k: "data/dcase/dataset/audio/train/unlabel_in_domain/"
-  synth_val_folder: "data/dcase/dataset/audio/validation/synthetic21_validation/soundscapes_16k/"
+  synth_val_folder: "data/dcase/dataset/dcase_synth/audio/validation/synthetic21_validation/soundscapes_16k/"
   synth_val_folder_44k: "data/dcase/dataset/dcase_synth/audio/validation/synthetic21_validation/soundscapes/"
   synth_val_tsv:  "data/dcase/dataset/dcase_synth/metadata/validation/synthetic21_validation/soundscapes.tsv"
   synth_val_dur: "data/dcase/dataset/dcase_synth/metadata/validation/synthetic21_validation/durations.tsv"
@@ -101,5 +101,5 @@ hts-at:
   htsat_dim: 96 
   htsat_depth: [2,2,6,2]
 classes_num: 10
-swin_pretrain_path: "ckpt_hts-at/HTSAT_AudioSet_Saved_4.ckpt"
+swin_pretrain_path: "ckpt_hts-at/HTSAT_AudioSet_Saved_2.ckpt"
 panns_pretrain_path: "ckpt_panns/Cnn14_DecisionLevelAtt_mAP0.425.pth"

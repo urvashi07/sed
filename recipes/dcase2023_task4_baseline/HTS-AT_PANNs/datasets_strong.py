@@ -156,9 +156,11 @@ class SEDDataset_Strong(Dataset):
         data_dict = {
             "audio_name": filepath,
             "waveform": waveform,
-            "target_frames": labels_frames_arr,
-            "target_classes": labels_arr,
+            "target": torch.tensor(labels_frames_arr),
+            #"target_classes": torch.tensor(labels_arr),
         }
+        #data_list = [filepath, waveform, torch.tensor(labels_frames_arr)]
+            #"target_classes": torch.tensor(labels_arr)
         return data_dict
 
     def __len__(self):
