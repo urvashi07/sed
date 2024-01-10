@@ -319,27 +319,20 @@ if __name__ == "__main__":
 
     sed_data = data_prep(train_dataset, val_dataset, eval_dataset)
 
-    checkpoint_dir = os.path.join("/home/unegi2s/Documents/sed_github/sed/recipes/dcase2023_task4_baseline/HTS-AT_PANNs/checkpoints")
-
-    if not os.path.exists(checkpoint_dir):
-        os.mkdir(checkpoint_dir)
-
-
     checkpoint_callback = ModelCheckpoint(
         monitor="mAP",
-        dirpath=checkpoint_dir,
-        filename='l-{epoch:d}-{mAP:.3f}',
-        save_on_train_epoch_end= True,
+        dirpath="checkpoints/l-{epoch:d}-{mAP:.3f}",
+        # filename='l-{epoch:d}-{mAP:.3f}',
         save_top_k=2,
         mode="max",
     )
 
     trainer = pl.Trainer(
         deterministic=False,
-        #accelerator="cpu",  # For running locally,
-        accelerator="gpu",
-        #gpus=None,  # For running locally,
-        gpus=[0],
+        accelerator="cpu",  # For running locally,
+        #accelerator="gpu",
+        gpus=None,  # For running locally,
+        #gpus=[0],
         max_epochs=configs["training"]["max_epoch"],
         auto_lr_find=True,
         sync_batchnorm=True,
@@ -391,8 +384,7 @@ if __name__ == "__main__":
         )
 
 
-    model = SEDWrapper(sed_model=sed_model, config=config, df_eval = pd.concat([df_train_strong, df_train_synth]).iloc[list_val_indices], 
-                       df_test = pd.concat([df_eval_strong, df_eval_strong]), prefix_folder = configs["data"]["prefix_folder"])
+    model = SEDWrapper(sed_model=sed_model, config=config, prefix_folder = configs["data"]["prefix_folder"])
 
     trainer.tune(model, datamodule=sed_data)
     sed_data.setup("fit")

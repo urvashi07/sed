@@ -1,169 +1,261 @@
 import pandas as pd
+import scipy
+from pathlib import Path
 import numpy as np
-import torch
-from panns_models import *
-from model.htsat import HTSAT_Swin_Transformer
-import warnings
+import config
+import sed_eval
 import os
-import torchaudio
-import logging
 
+def get_event_list_current_file(df, fname):
+    """
+    Get list of events for a given filename
+    Args:
+        df: pd.DataFrame, the dataframe to search on
+        fname: the filename to extract the value from the dataframe
+    Returns:
+         list of events (dictionaries) for the given filename
+    """
+    event_file = df[df["filename"] == fname]
+    if len(event_file) == 1:
+        if pd.isna(event_file["event_label"].iloc[0]):
+            event_list_for_current_file = [{"filename": fname}]
+        else:
+            event_list_for_current_file = event_file.to_dict("records")
+    else:
+        event_list_for_current_file = event_file.to_dict("records")
 
-def get_model(model_name, config: dict, weights_path: str):
-    if model_name == "hts-at" or args.model == "htsat":
-        model = HTSAT_Swin_Transformer(
-        spec_size=configs["hts-at"]["htsat_spec_size"],
-        patch_size=configs["hts-at"]["htsat_patch_size"],
-        in_chans=1,
-        num_classes=configs["classes_num"],
-        window_size=configs["hts-at"]["htsat_window_size"],
-        config = config,
-        depths = configs["hts-at"]["htsat_depth"],
-        embed_dim = configs["hts-at"]["htsat_dim"],
-        patch_stride=tuple(configs["hts-at"]["htsat_stride"]),
-        num_heads=configs["hts-at"]["htsat_num_head"]
+    return event_list_for_current_file
+
+def event_based_evaluation_df(
+    reference, estimated, t_collar=0.200, percentage_of_length=0.2
+):
+    """ Calculate EventBasedMetric given a reference and estimated dataframe
+
+    Args:
+        reference: pd.DataFrame containing "filename" "onset" "offset" and "event_label" columns which describe the
+            reference events
+        estimated: pd.DataFrame containing "filename" "onset" "offset" and "event_label" columns which describe the
+            estimated events to be compared with reference
+        t_collar: float, in seconds, the number of time allowed on onsets and offsets
+        percentage_of_length: float, between 0 and 1, the percentage of length of the file allowed on the offset
+    Returns:
+         sed_eval.sound_event.EventBasedMetrics with the scores
+    """
+
+    evaluated_files = reference["filename"].unique()
+
+    classes = []
+    classes.extend(reference.event_label.dropna().unique())
+    classes.extend(estimated.event_label.dropna().unique())
+    classes = list(set(classes))
+
+    event_based_metric = sed_eval.sound_event.EventBasedMetrics(
+        event_label_list=classes,
+        t_collar=t_collar,
+        percentage_of_length=percentage_of_length,
+        empty_system_output_handling="zero_score",
     )
+
+    for fname in evaluated_files:
+        reference_event_list_for_current_file = get_event_list_current_file(
+            reference, fname
+        )
+        estimated_event_list_for_current_file = get_event_list_current_file(
+            estimated, fname
+        )
+
+        event_based_metric.evaluate(
+            reference_event_list=reference_event_list_for_current_file,
+            estimated_event_list=estimated_event_list_for_current_file,
+        )
+
+    return event_based_metric
+
+def segment_based_evaluation_df(reference, estimated, time_resolution=1.0):
+    """ Calculate SegmentBasedMetrics given a reference and estimated dataframe
+
+        Args:
+            reference: pd.DataFrame containing "filename" "onset" "offset" and "event_label" columns which describe the
+                reference events
+            estimated: pd.DataFrame containing "filename" "onset" "offset" and "event_label" columns which describe the
+                estimated events to be compared with reference
+            time_resolution: float, the time resolution of the segment based metric
+        Returns:
+             sed_eval.sound_event.SegmentBasedMetrics with the scores
+        """
+    evaluated_files = reference["filename"].unique()
+
+    classes = []
+    classes.extend(reference.event_label.dropna().unique())
+    classes.extend(estimated.event_label.dropna().unique())
+    classes = list(set(classes))
+
+    segment_based_metric = sed_eval.sound_event.SegmentBasedMetrics(
+        event_label_list=classes, time_resolution=time_resolution
+    )
+
+    for fname in evaluated_files:
+        reference_event_list_for_current_file = get_event_list_current_file(
+            reference, fname
+        )
+        estimated_event_list_for_current_file = get_event_list_current_file(
+            estimated, fname
+        )
+
+        segment_based_metric.evaluate(
+            reference_event_list=reference_event_list_for_current_file,
+            estimated_event_list=estimated_event_list_for_current_file,
+        )
+
+    return segment_based_metric
+
+def compute_sed_eval_metrics(predictions, groundtruth):
+    """ Compute sed_eval metrics event based and segment based with default parameters used in the task.
+    Args:
+        predictions: pd.DataFrame, predictions dataframe
+        groundtruth: pd.DataFrame, groundtruth dataframe
+    Returns:
+        tuple, (sed_eval.sound_event.EventBasedMetrics, sed_eval.sound_event.SegmentBasedMetrics)
+    """
+    metric_event = event_based_evaluation_df(
+        groundtruth, predictions, t_collar=0.200, percentage_of_length=0.2
+    )
+    metric_segment = segment_based_evaluation_df(
+        groundtruth, predictions, time_resolution=1.0
+    )
+
+    return metric_event, metric_segment
+
+def log_sedeval_metrics(predictions, ground_truth, save_dir=None):
+    """ Return the set of metrics from sed_eval
+    Args:
+        predictions: pd.DataFrame, the dataframe of predictions.
+        ground_truth: pd.DataFrame, the dataframe of groundtruth.
+        save_dir: str, path to the folder where to save the event and segment based metrics outputs.
+
+    Returns:
+        tuple, event-based macro-F1 and micro-F1, segment-based macro-F1 and micro-F1
+    """
+    if predictions.empty:
+        return 0.0, 0.0, 0.0, 0.0
+
+    gt = pd.read_csv(ground_truth, sep="\t")
+
+    event_res, segment_res = compute_sed_eval_metrics(predictions, gt)
+
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, "event_f1.txt"), "w") as f:
+            f.write(str(event_res))
+
+        with open(os.path.join(save_dir, "segment_f1.txt"), "w") as f:
+            f.write(str(segment_res))
+
+    return (
+        event_res.results()["class_wise_average"]["f_measure"]["f_measure"],
+        event_res.results()["overall"]["f_measure"]["f_measure"],
+        event_res.results(),
+        segment_res.results()["class_wise_average"]["f_measure"]["f_measure"],
+        segment_res.results()["overall"]["f_measure"]["f_measure"],
+    )
+
+def find_contiguous_regions(activity_array):
+        """Find contiguous regions from bool valued numpy.array.
+        Transforms boolean values for each frame into pairs of onsets and offsets.
+
+        Parameters
+        ----------
+        activity_array : numpy.array [shape=(t)]
+            Event activity array, bool values
+
+        Returns
+        -------
+        numpy.ndarray [shape=(2, number of found changes)]
+            Onset and offset indices pairs in matrix
+
+        """
+
+        # Find the changes in the activity_array
+        change_indices = np.logical_xor(activity_array[1:], activity_array[:-1]).nonzero()[0]
+
+        # Shift change_index with one, focus on frame after the change.
+        change_indices += 1
+
+        if activity_array[0]:
+            # If the first element of activity_array is True add 0 at the beginning
+            change_indices = np.r_[0, change_indices]
+
+        if activity_array[-1]:
+            # If the last element of activity_array is True, add the length of the array
+            change_indices = np.r_[change_indices, activity_array.size]
+
+        # Reshape the result into two columns
+        return change_indices.reshape((-1, 2))
+
+def _frame_to_time(frame, hop_length, sr):
+        return (frame * hop_length) / sr
+
+
+def decode_strong(labels, hop_length, sr):
+        """ Decode the encoded strong labels
+        Args:
+            labels: numpy.array, the encoded labels to be decoded
+        Returns:
+            list
+            Decoded labels, list of list: [[label, onset offset], ...]
+
+        """
+        result_labels = []
         
-    elif model_name == "panns":
-        # model
-        model_config = {
-            "sample_rate": 16000,
-            "window_size": 1024,
-            "hop_size": 320,
-            "mel_bins": 64,
-            "fmin": 50,
-            "fmax": 14000,
-            "classes_num": 10
-                }
-        model = PANNsCNN14Att(**model_config)
-        #weights = torch.load("Cnn14_DecisionLevelAtt_mAP0.425.pth", map_location = "cpu")
-        # Fixed in V3
-        #model.load_state_dict(weights["model"])
-        model.att_block = AttBlock(2048, 10, activation='sigmoid')
-        
+        for i, label_column in enumerate(labels):
+            change_indices = find_contiguous_regions(label_column)
+            # append [label, onset, offset] in the result list
+            for row in change_indices:
+                result_labels.append(
+                    [
+                        config.id2classes[i],
+                        max(0.0, _frame_to_time(row[0], hop_length, sr)),
+                        min(10.0, _frame_to_time(row[1], hop_length, sr)),
+                    ]
+                )
+        return result_labels
+
+def batched_decode_preds(
     
-    checkpoint = torch.load(weights_path)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logging.basicConfig(level=logging.INFO) 
-    logging.info("device: " +device)
-    model.to(device)
-    model.eval()
-    return model
+    strong_preds, filenames, thresholds=0.5, median_filter=7, pad_indx=None, hop_length = 320, sr = 16000
+):
+    """ Decode a batch of predictions to dataframes. Each threshold gives a different dataframe and stored in a
+    dictionary
 
-def prediction_for_clip(SR,
-               max_audio_DURATION,
-               model_name,
-               test_df: pd.DataFrame,
-                clip: np.ndarray, 
-                model,
-                threshold=0.5):
-    PERIOD = max_audio_DURATION
-    audios = []
-    y = clip.astype(np.float32)
-    len_y = len(y)
-    start = 0
-    end = PERIOD * SR
-    while True:
-        y_batch = y[start:end].astype(np.float32)
-        if len(y_batch) != PERIOD * SR:
-            y_pad = np.zeros(PERIOD * SR, dtype=np.float32)
-            y_pad[:len(y_batch)] = y_batch
-            audios.append(y_pad)
-            break
-        start = end
-        end += PERIOD * SR
-        audios.append(y_batch)
-        
-    array = np.asarray(audios)
-    tensors = torch.from_numpy(array)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    model.eval()
-    estimated_event_list = []
-    global_time = 0.0
-    site = test_df["site"].values[0]
-    audio_id = test_df["audio_id"].values[0]
-    for image in progress_bar(tensors):
-        image = image.view(1, image.size(0))
-        image = image.to(device)
+    Args:
+        strong_preds: torch.Tensor, batch of strong predictions.
+        filenames: list, the list of filenames of the current batch.
+        encoder: ManyHotEncoder object, object used to decode predictions.
+        thresholds: list, the list of thresholds to be used for predictions.
+        median_filter: int, the number of frames for which to apply median window (smoothing).
+        pad_indx: list, the list of indexes which have been used for padding.
 
-        with torch.no_grad():
-            prediction = model(image)
-            framewise_outputs = prediction["framewise_output"].detach(
-                ).cpu().numpy()[0]
-                
-        thresholded = framewise_outputs >= threshold
+    Returns:
+        dict of predictions, each keys is a threshold and the value is the DataFrame of predictions.
+    """
+    # Init a dataframe per threshold
+    prediction_dfs = pd.DataFrame(columns=["filename", "event_label", "onset", "offset"])
+    #for threshold in thresholds:
+        #prediction_dfs[threshold] = pd.DataFrame()
 
-        for target_idx in range(thresholded.shape[1]):
-            if thresholded[:, target_idx].mean() == 0:
-                pass
-            else:
-                detected = np.argwhere(thresholded[:, target_idx]).reshape(-1)
-                head_idx = 0
-                tail_idx = 0
-                while True:
-                    if (tail_idx + 1 == len(detected)) or (
-                            detected[tail_idx + 1] - 
-                            detected[tail_idx] != 1):
-                        onset = 0.01 * detected[
-                            head_idx] + global_time
-                        offset = 0.01 * detected[
-                            tail_idx] + global_time
-                        onset_idx = detected[head_idx]
-                        offset_idx = detected[tail_idx]
-                        max_confidence = framewise_outputs[
-                            onset_idx:offset_idx, target_idx].max()
-                        mean_confidence = framewise_outputs[
-                            onset_idx:offset_idx, target_idx].mean()
-                        estimated_event = {
-                            "site": site,
-                            "audio_id": audio_id,
-                            "ebird_code": INV_BIRD_CODE[target_idx],
-                            "onset": onset,
-                            "offset": offset,
-                            "max_confidence": max_confidence,
-                            "mean_confidence": mean_confidence
-                        }
-                        estimated_event_list.append(estimated_event)
-                        head_idx = tail_idx + 1
-                        tail_idx = tail_idx + 1
-                        if head_idx >= len(detected):
-                            break
-                    else:
-                        tail_idx += 1
-        global_time += PERIOD
-        
-    prediction_df = pd.DataFrame(estimated_event_list)
-    return prediction_df
+    for j in range(strong_preds.shape[0]):  # over batches
+        #for c_th in thresholds:
+        c_preds = strong_preds[j]
+        if pad_indx is not None:
+                true_len = int(c_preds.shape[-1] * pad_indx[j].item())
+                c_preds = c_preds[:true_len]
+        pred = c_preds.transpose(0, 1).detach().cpu().numpy()
+        pred = pred > thresholds
+        pred = scipy.ndimage.filters.median_filter(pred, (median_filter, 1))
+        pred = decode_strong(pred, hop_length, sr)
+        pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
+        pred["filename"] = filenames[j]
+        prediction_dfs = pd.concat([prediction_dfs, pred], ignore_index=True)
+        #prediction_dfs[c_th] = prediction_dfs[c_th].append(pred, ignore_index=True)
 
-def prediction(SR,
-               max_audio_DURATION,
-               model_name,
-               test_df: pd.DataFrame,
-               test_audio_path: Path,
-               model_config: dict,
-               weights_path: str,
-               threshold=0.5):
-    model = get_model(model_name, model_config, weights_path)
-    unique_audio_id = test_df.filename.unique()
-
-    warnings.filterwarnings("ignore")
-    prediction_dfs = []
-    for audio_id in unique_audio_id:
-        print(f"Loading {audio_id}")
-        clip, _ = torchaudio.load(os.path.join(test_audio_path, audio_id))
-        
-        test_df_for_audio_id = test_df.query(
-            f"filename == '{audio_id}'").reset_index(drop=True)
-        print(f"Prediction on {audio_id}")
-        prediction_df = prediction_for_clip(test_df_for_audio_id,
-                                                clip=clip,
-                                                model=model,
-                                                threshold=threshold)
-
-        prediction_dfs.append(prediction_df)
-    
-    prediction_df = pd.concat(prediction_dfs, axis=0, sort=False).reset_index(drop=True)
-    return prediction_df
-
+    return prediction_dfs

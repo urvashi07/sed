@@ -77,10 +77,6 @@ def prepare_data(path, audio_path, data_type, data):
     
     event_dict = get_file_info(df)
     list_audio_info = convert_to_list_dataclass(event_dict, audio_path, data_type)
-    """if data == "eval-strong":
-        print(df)
-        print(list_audio_info[:10])
-        sys.exit()"""
     return list_audio_info
 
 

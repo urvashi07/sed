@@ -296,16 +296,9 @@ if __name__ == "__main__":
     sed_data = data_prep(train_dataset, val_data, 
                          test_dataset, batch_sampler)
                          #batch_sampler_val)
-    for batch in sed_data.train_dataloader():
-        print(batch)
-        print(type(batch))
-        break
+
     print("..............................")
 
-    for batch in sed_data.val_dataloader():
-        print(batch)
-        print(type(batch))
-        break
 
     checkpoint_callback = ModelCheckpoint(
         monitor="mAP",

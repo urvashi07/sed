@@ -239,6 +239,7 @@ class SwinTransformerBlock(nn.Module):
             proj_drop=drop,
         )
 
+
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         if self.norm_before_mlp == "ln":
             self.norm2 = nn.LayerNorm(dim)
@@ -288,6 +289,8 @@ class SwinTransformerBlock(nn.Module):
             attn_mask = None
 
         self.register_buffer("attn_mask", attn_mask)
+
+    
 
     def forward(self, x):
         # pdb.set_trace()
@@ -339,6 +342,9 @@ class SwinTransformerBlock(nn.Module):
         # FFN
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        
+
 
         return x, attn
 
@@ -566,6 +572,7 @@ class HTSAT_Swin_Transformer(nn.Module):
         self.mlp_ratio = mlp_ratio
 
         self.use_checkpoint = use_checkpoint
+        self.attention_map = None
 
         #  process mel-spec ; used only once
         self.freq_ratio = self.spec_size // self.config.mel_bins
@@ -742,13 +749,24 @@ class HTSAT_Swin_Transformer(nn.Module):
     @torch.jit.ignore
     def no_weight_decay_keywords(self):
         return {"relative_position_bias_table"}
+    
+    def save_attn_gradients(self, attn_gradients):
+        self.attn_gradients = attn_gradients
 
-    def forward_features(self, x):
+    def save_attention_map(self, attention_map):
+        self.attention_map = attention_map
+
+    def get_attention_map(self):
+        return self.attention_map
+
+    def forward_features(self, x, register_hook = False):
         # A deprecated optimization for using a hierarchical output from different blocks
         # if self.config.htsat_hier_output:
         #     hier_x = []
         #     hier_attn = []
-
+        ##print("In forward features")
+        ##print(x.shape)
+        ##print(x.shape[2])
         frames_num = x.shape[2]
         x = self.patch_embed(x)
         if self.ape:
@@ -756,6 +774,11 @@ class HTSAT_Swin_Transformer(nn.Module):
         x = self.pos_drop(x)
         for i, layer in enumerate(self.layers):
             x, attn = layer(x)
+
+        self.save_attention_map(attn)
+
+        if register_hook:
+            attn.register_hook(self.save_attn_gradients)
             # A deprecated optimization for using a hierarchical output from different blocks
             # if self.config.htsat_hier_output:
             #     hier_x.append(x)
@@ -798,16 +821,21 @@ class HTSAT_Swin_Transformer(nn.Module):
         if self.config.enable_tscam:
             # for x
             x = self.norm(x)
+            ##print("in if")
+            ##print(x.shape)
             B, N, C = x.shape
             SF = frames_num // (2 ** (len(self.depths) - 1)) // self.patch_stride[0]
+
             ST = frames_num // (2 ** (len(self.depths) - 1)) // self.patch_stride[1]
             x = x.permute(0, 2, 1).contiguous().reshape(B, C, SF, ST)
+            ##print(x.shape)
             B, C, F, T = x.shape
             # group 2D CNN
             c_freq_bin = F // self.freq_ratio
             x = x.reshape(B, C, F // c_freq_bin, c_freq_bin, T)
+            ##print(x.shape)
             x = x.permute(0, 1, 3, 2, 4).contiguous().reshape(B, C, c_freq_bin, -1)
-
+            ##print(x.shape)
             # get latent_output
             latent_output = self.avgpool(torch.flatten(x, 2))
             latent_output = torch.flatten(latent_output, 1)
@@ -830,8 +858,10 @@ class HTSAT_Swin_Transformer(nn.Module):
                 attn = attn.unsqueeze(dim=2)
 
             x = self.tscam_conv(x)
+            ##print("tscam")
+            ##print(x.shape)
             x = torch.flatten(x, 2)  # B, C, T
-
+            ##print(x.shape)
             # A deprecated optimization for using the max value instead of average value
             # if self.config.htsat_use_max:
             #     x1 = self.a_maxpool(x)
@@ -844,10 +874,14 @@ class HTSAT_Swin_Transformer(nn.Module):
                     8 * self.patch_stride[1],
                 )
             else:
+                ##print("before fpx")
+                ##print(x.shape)
                 fpx = interpolate(
                     torch.sigmoid(x).permute(0, 2, 1).contiguous(), 15
                 )  # * self.patch_stride[1])
                 # print(framewise_output.shape)
+                ##print("fpx")
+                ##print(fpx.shape)
                 fpx = pad_framewise_output(fpx, 501)
                 # fpx = interpolate
 
@@ -860,7 +894,7 @@ class HTSAT_Swin_Transformer(nn.Module):
             x = self.avgpool(x)
             x = torch.flatten(x, 1)
 
-            if self.config.loss_type == "clip_ce":
+            if self.config.loss_type_frame == "clip_ce":
                 output_dict = {
                     "framewise_output": fpx,  # already sigmoided
                     "clipwise_output": x,
@@ -970,7 +1004,7 @@ class HTSAT_Swin_Transformer(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, mixup_lambda=None, infer_mode=False
+        self, x: torch.Tensor, mixup_lambda=None, infer_mode=False, register_hook = False
     ):  # out_feat_keys: List[str] = None):
         x = self.spectrogram_extractor(x)  # (batch_size, 1, time_steps, freq_bins)
         x = self.logmel_extractor(x)  # (batch_size, 1, time_steps, mel_bins)
@@ -1060,8 +1094,9 @@ class HTSAT_Swin_Transformer(nn.Module):
                         "clipwise_output": clipwise_output,
                     }
             else:  # this part is typically used, and most easy one
+                #print(x.shape)
+                #print(x.shape[2])
                 x = self.reshape_wav2img(x)
-                output_dict = self.forward_features(x)
+                output_dict = self.forward_features(x, register_hook = False)
         # x = self.head(x)
         return output_dict
-
