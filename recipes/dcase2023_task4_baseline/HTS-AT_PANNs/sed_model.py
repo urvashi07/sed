@@ -90,7 +90,10 @@ class SEDWrapper(pl.LightningModule):
         #self.filename_eval = self.df_eval.filename.unique()
         #self.filename_test = self.df_test.filename.unique()
         self.prediction_dfs = []
-        conf_file_path = "/home/unegi/Documents/dcase2023_task4_gitlab/DESED_task/recipes/dcase2023_task4_baseline/confs/default.yaml"
+        conf_file_path = os.path.join(
+                            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "confs/default.yaml",
+                            )
         with open(conf_file_path, "r") as f:
             self.configs = yaml.safe_load(f)
         # for weak labels we simply compute f1 score

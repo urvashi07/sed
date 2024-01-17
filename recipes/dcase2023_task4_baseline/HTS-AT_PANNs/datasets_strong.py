@@ -9,6 +9,7 @@ import torch.nn as nn
 import logging
 import config
 import random
+import librosa
 from torchlibrosa.stft import Spectrogram, LogmelFilterBank
 
 
@@ -17,9 +18,9 @@ class SEDDataset_Strong(Dataset):
         self,
         transformation,
         target_sample_rate,
-        config,
         num_samples,
-        list_audio_info,
+        config,
+        data,
         device,
     ):
         """
@@ -29,15 +30,13 @@ class SEDDataset_Strong(Dataset):
            config: the config.py module
            eval_model (bool): to indicate if the dataset is a testing dataset
         """
-        # self.annotations = pd.read_csv(annotations_file ,sep = "\t")
-        # self.audio_dir = audio_dir
         self.device = device
         self.waveform_transforms = False
         if transformation is not None:
             self.transformation = transformation.to(self.device)
         else:
             self.transformation = None
-        self.list_audio_info = list_audio_info
+        self.data = data
         # self.filenames = list(self.df["filename"].unique())
         self.target_sample_rate = target_sample_rate
         self.net_pooling = 1
@@ -50,7 +49,7 @@ class SEDDataset_Strong(Dataset):
         self.sr = self.configs["feats"]["sample_rate"]
         self.hop_length = self.configs["feats"]["hop_length"]
         # total_size = len(self.annotations)
-        self.audio_len = 10
+        self.audio_len = self.configs["feats"]["max_audio_duration"]
         self.fmin = self.configs["feats"]["f_min"]
         self.fmax = self.configs["feats"]["f_max"]
         self.window_size = self.configs["feats"]["n_window"]
@@ -91,6 +90,8 @@ class SEDDataset_Strong(Dataset):
             hop_length=self.hop_length,
         )
 
+        
+
     def time_shifting(self, x):
         frame_num = len(x)
         shift_len = random.randint(0, self.shift_max - 1)
@@ -126,27 +127,36 @@ class SEDDataset_Strong(Dataset):
             "target": (classes_num,)
         }
         """
-        filename = self.list_audio_info[index].filename
-        filepath = self.list_audio_info[index].filepath
-        onset_times = self.list_audio_info[index].onset_times
-        offset_times = self.list_audio_info[index].offset_times
-        class_labels = self.list_audio_info[index].class_labels
-        waveform, sr = torchaudio.load(filepath)
+        filename = list(self.data.keys())[index]
+        ##TO DO: filepath is extra: neededx only for validation step for masks ---- should be possible to change
+        ##
+        ##
+        filepath = os.path.join(self.data.attrs["folder_path"], filename)
+        onset_times = self.data[filename].attrs["onset_times"]
+        offset_times = self.data[filename].attrs["offset_times"]
+        class_labels = self.data[filename].attrs["class_labels"]
+        sr = self.data[filename].attrs["sr"]
+        waveform = np.array(self.data[filename]["waveform"])
 
         # tmp_data = np.array(self.event_dict[filename]).T
         frame_start = np.floor(self.time_to_frame(onset_times)).astype(int)
         frame_end = np.ceil(self.time_to_frame(offset_times)).astype(int)
         class_int = class_labels.astype(int)
-        if waveform.shape[0] > 1:
-            waveform = self._mix_down_if_necessary(waveform)
-        if not waveform.shape[1] == self.target_sample_rate:
-            waveform = self._resample_if_necessary(waveform, sr)
+        #if waveform.shape[0] > 1:
+            #waveform = self._mix_down_if_necessary(waveform)
 
-        waveform = self._cut_if_necessary(waveform, 0, 10)
+        waveform = self._cut_if_necessary(waveform)
         waveform = self._right_pad_if_necessary(waveform)
-        waveform = waveform.view(-1)
-
-        mbe = self.mel_spec(waveform).T
+        #waveform = waveform.view(-1)
+        mel_spec = librosa.feature.melspectrogram(
+            y=waveform,
+            sr=sr,
+            n_mels=self.mel_bins,
+            n_fft=self.window_size,
+            hop_length=self.hop_length,
+            win_length=self.window_size
+            )
+        mbe = mel_spec.T
         labels_frames_arr = np.zeros((mbe.shape[0], self.classes_num))
         labels_arr = np.zeros(self.classes_num)
 
@@ -155,59 +165,32 @@ class SEDDataset_Strong(Dataset):
             labels_arr[val] = 1
         data_dict = {
             "audio_name": filepath,
-            "waveform": waveform,
+            "waveform": torch.tensor(waveform),
             "target": torch.tensor(labels_frames_arr),
             #"target_classes": torch.tensor(labels_arr),
         }
-        #data_list = [filepath, waveform, torch.tensor(labels_frames_arr)]
-            #"target_classes": torch.tensor(labels_arr)
         return data_dict
 
     def __len__(self):
-        return len(self.list_audio_info)
+        return len(self.data)
 
-    """def _get_onset_time(self, index):
-        column_index = self.annotations.columns.get_loc(self.onset_column)
-        return self.annotations.iloc[index, column_index]
-    
-    def _get_offset_time(self, index):
-        column_index = self.annotations.columns.get_loc(self.offset_column)
-        return self.annotations.iloc[index, column_index]"""
-
-    def _get_audio_sample_path(self, index):
-        path = os.path.join(self.audio_dir, self.annotations.iloc[index, 0])
-        # print(path)
-        return path
-
-    def _cut_if_necessary(self, signal, onset, offset):
-        # onset_frame = int(onset * self.target_sample_rate)
-        # offset_frame = int(offset * self.target_sample_rate *self.max_audio_duration)
-        # signal = signal[:, onset_frame:offset_frame]
+    def _cut_if_necessary(self, signal):
         max_length = self.sr * self.max_audio_duration
-        if signal.shape[1] > max_length:
+        if signal.shape[0] > max_length:
             signal = signal[:, : (self.sr * self.max_audio_duration)]
         return signal
 
     def _right_pad_if_necessary(self, signal):
-        length_signal = signal.shape[1]
+        length_signal = signal.shape[0]
         max_length = self.sr * self.max_audio_duration
         if length_signal < max_length:
             num_missing_samples = max_length - length_signal
             last_dim_padding = (0, num_missing_samples)
-            signal = nn.functional.pad(signal, last_dim_padding)
+            signal = np.pad(signal, last_dim_padding, mode='constant')
         return signal
 
-    def _resample_if_necessary(self, signal, sr):
-        # resampler = torchaudio.transforms.Resample(sr, self.target_sample_rate)
-        if not sr == self.target_sample_rate:
-            signal1 = torchaudio.functional.resample(
-                signal, orig_freq=sr, new_freq=self.target_sample_rate
-            )
-            return signal1
-        else:
-            return signal
 
     def _mix_down_if_necessary(self, signal):
         if signal.shape[0] > 1:
-            signal = torch.mean(signal, dim=0, keepdim=True)
+            signal = np.mean(signal, axis=0, keepdims=True)
         return signal

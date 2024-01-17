@@ -47,8 +47,8 @@ from collections import OrderedDict
 import argparse
 
 sys.path.append(
-    "/home/unegi/Documents/dcase2023_task4_gitlab/DESED_task/desed_task/dataio/"
-)
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "desed_task/dataio/")
+            )
 from sampler import ConcatDatasetBatchSampler
 
 warnings.filterwarnings("ignore")
@@ -61,8 +61,17 @@ from pathlib import Path
 import numpy as np
 from prepare_data import prepare_all_data
 
+from create_hdf_file import create_hdf_file
+import h5py
+
 print(torch.cuda.is_available())
 
+def is_hdf5_empty(file_path):
+    try:
+        with h5py.File(file_path, 'r') as file:
+            return len(file.keys()) == 0
+    except OSError:
+        return True
 
 def custom_collate(batch):
     audio_names = [item["audio_name"] for item in batch]
@@ -194,20 +203,36 @@ if __name__ == "__main__":
 
     data = prepare_all_data(configs["data"])
 
+    hdf_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), configs["hdf_file"])
+
+    if is_hdf5_empty(hdf_file_path):
+        create_hdf_file(data, hdf_file_path, sr=SAMPLE_RATE)
+
+    h5py_file = h5py.File(hdf_file_path, "r")
+
+    train_data = h5py_file["train"]
+    eval_data = h5py_file["eval"]
+    test_data = h5py_file["test"]
+    
+    print("===================")
+    print(train_data)
+
     train_dataset_strong = SEDDataset_Strong(
         transformation=None,
         target_sample_rate=SAMPLE_RATE,
         num_samples=NUM_SAMPLES,
-        list_audio_info=data["train"]["strong"],
+        data=train_data["strong"],
         config=configs,
         device=device,
     )
+
+    print(train_dataset_strong[0])
 
     train_dataset_synth = SEDDataset_Strong(
         transformation=None,
         target_sample_rate=SAMPLE_RATE,
         num_samples=NUM_SAMPLES,
-        list_audio_info=data["train"]["synth"],
+        data=train_data["synth"],
         config=configs,
         device=device,
     )
@@ -216,7 +241,7 @@ if __name__ == "__main__":
         transformation=None,
         target_sample_rate=SAMPLE_RATE,
         num_samples=NUM_SAMPLES,
-        list_audio_info=data["train"]["weak"],
+        data=train_data["weak"],
         config=configs,
         device=device,
     )
@@ -244,7 +269,7 @@ if __name__ == "__main__":
         transformation=None,
         target_sample_rate=SAMPLE_RATE,
         num_samples=NUM_SAMPLES,
-        list_audio_info=data["eval"]["synth"],
+        data=eval_data["synth"],
         config=configs,
         device=device,
     )
@@ -253,7 +278,7 @@ if __name__ == "__main__":
         transformation=None,
         target_sample_rate=SAMPLE_RATE,
         num_samples=NUM_SAMPLES,
-        list_audio_info=data["eval"]["weak"],
+        data=eval_data["weak"],
         config=configs,
         device=device,
     )
@@ -262,7 +287,7 @@ if __name__ == "__main__":
         transformation=None,
         target_sample_rate=SAMPLE_RATE,
         num_samples=NUM_SAMPLES,
-        list_audio_info=data["eval"]["strong"],
+        data=test_data["strong"],
         config=configs,
         device=device,
     )
@@ -281,6 +306,7 @@ if __name__ == "__main__":
     val_data = torch.utils.data.Subset(val_data, np.arange(8))
     #sampler_eval = [torch.utils.data.RandomSampler(x) for x in total_eval_data]
     #batch_sampler_val = ConcatDatasetBatchSampler(sampler_eval, batch_sizes_val)
+    
 
 
     """if configs["training"]["reduce_dataset_size"]:
@@ -310,10 +336,10 @@ if __name__ == "__main__":
 
     trainer = pl.Trainer(
         deterministic=False,
-        accelerator="cpu",  # For running locally,
-        # accelerator="gpu",
-        gpus=None,  # For running locally,
-        # gpus=[0],
+        #accelerator="cpu",  # For running locally,
+        accelerator="gpu",
+        #gpus=None,  # For running locally,
+        gpus=[0],
         max_epochs=1,
         # max_epochs=configs["training"]["max_epoch"],
         auto_lr_find=False,
@@ -446,7 +472,7 @@ if __name__ == "__main__":
         #model.load_state_dict(test_state_dict)"""
 
     trainer.test(model, sed_data.test_dataloader(), ckpt_path="best")
-
+    h5py_file.close()
     end_time = time.time()
     print(f"End time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
 

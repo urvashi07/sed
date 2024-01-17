@@ -131,10 +131,12 @@ def prepare_all_data(config):
             "weak" : list_audio_info_weak
         },
         "eval": {
-            "strong": list_audio_info_eval_strong,
             "synth": list_audio_info_eval_synth,
             "weak": list_audio_info_eval_weak
         },
+        "test": {
+            "strong": list_audio_info_eval_strong
+        }
     }
 
 

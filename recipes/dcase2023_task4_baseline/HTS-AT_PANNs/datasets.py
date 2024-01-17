@@ -19,7 +19,7 @@ class SEDDataset(Dataset):
         target_sample_rate,
         config,
         num_samples,
-        list_audio_info,
+        data,
         device,
     ):
         """
@@ -37,7 +37,7 @@ class SEDDataset(Dataset):
             self.transformation = transformation.to(self.device)
         else:
             self.transformation = None
-        self.list_audio_info = list_audio_info
+        self.data = data
         # self.filenames = list(self.df["filename"].unique())
         self.target_sample_rate = target_sample_rate
         self.net_pooling = 1
@@ -50,7 +50,7 @@ class SEDDataset(Dataset):
         self.sr = self.configs["feats"]["sample_rate"]
         self.hop_length = self.configs["feats"]["hop_length"]
         # total_size = len(self.annotations)
-        self.audio_len = 10
+        self.audio_len = self.configs["feats"]["max_audio_duration"]
         self.fmin = self.configs["feats"]["f_min"]
         self.fmax = self.configs["feats"]["f_max"]
         self.window_size = self.configs["feats"]["n_window"]
@@ -58,7 +58,7 @@ class SEDDataset(Dataset):
         n_frames = self.audio_len * self.num_samples
         self.n_frames = int(int((n_frames / self.hop_length)) / self.net_pooling)
         # logging.info("total dataset size: %d" %(total_size))
-        logging.info("class num: %d" % (self.configs["classes_num"]))
+        #logging.info("class num: %d" % (self.configs["classes_num"]))
         # self.event_dict = event_dict
 
 
@@ -97,21 +97,22 @@ class SEDDataset(Dataset):
             "target": (classes_num,)
         }
         """
-        filename = self.list_audio_info[index].filename
-        filepath = self.list_audio_info[index].filepath
-        class_labels = self.list_audio_info[index].class_labels
-        waveform, sr = torchaudio.load(filepath)
+        filename = list(self.data.keys())[index]
+        filepath = os.path.join(self.data.attrs["folder_path"], filename)
+        class_labels = self.data[filename].attrs["class_labels"].flatten()
+        sr = self.data[filename].attrs["sr"]
+        waveform = np.array(self.data[filename]["waveform"])
 
         # tmp_data = np.array(self.event_dict[filename]).T
         class_int = class_labels.astype(int)
-        if waveform.shape[0] > 1:
-            waveform = self._mix_down_if_necessary(waveform)
-        if not waveform.shape[1] == self.target_sample_rate:
-            waveform = self._resample_if_necessary(waveform, sr)
+        #if waveform.shape[0] > 1:
+        #   waveform = self._mix_down_if_necessary(waveform)
+        #if not waveform.shape[1] == self.target_sample_rate:
+        #    waveform = self._resample_if_necessary(waveform, sr)
 
-        waveform = self._cut_if_necessary(waveform, 0, 10)
+        waveform = self._cut_if_necessary(waveform)
         waveform = self._right_pad_if_necessary(waveform)
-        waveform = waveform.view(-1)
+        #waveform = waveform.view(-1)
 
         labels_arr = np.zeros(self.classes_num)
 
@@ -119,14 +120,14 @@ class SEDDataset(Dataset):
             labels_arr[val] = 1
         data_dict = {
             "audio_name": filepath,
-            "waveform": waveform,
+            "waveform": torch.tensor(waveform),
             "target": torch.tensor(labels_arr),
         }
         #data_list = [filepath, waveform, torch.tensor(labels_arr)]
         return data_dict
 
     def __len__(self):
-        return len(self.list_audio_info)
+        return len(self.data)
 
     """def _get_onset_time(self, index):
         column_index = self.annotations.columns.get_loc(self.onset_column)
@@ -141,22 +142,19 @@ class SEDDataset(Dataset):
         # print(path)
         return path
 
-    def _cut_if_necessary(self, signal, onset, offset):
-        # onset_frame = int(onset * self.target_sample_rate)
-        # offset_frame = int(offset * self.target_sample_rate *self.max_audio_duration)
-        # signal = signal[:, onset_frame:offset_frame]
+    def _cut_if_necessary(self, signal):
         max_length = self.sr * self.max_audio_duration
-        if signal.shape[1] > max_length:
+        if signal.shape[0] > max_length:
             signal = signal[:, : (self.sr * self.max_audio_duration)]
         return signal
 
     def _right_pad_if_necessary(self, signal):
-        length_signal = signal.shape[1]
+        length_signal = signal.shape[0]
         max_length = self.sr * self.max_audio_duration
         if length_signal < max_length:
             num_missing_samples = max_length - length_signal
             last_dim_padding = (0, num_missing_samples)
-            signal = nn.functional.pad(signal, last_dim_padding)
+            signal = np.pad(signal, last_dim_padding, mode='constant')
         return signal
 
     def _resample_if_necessary(self, signal, sr):

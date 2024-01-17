@@ -36,7 +36,7 @@ scaler:
 data: # change with your paths if different.
   # NOTE: if you have data in 44kHz only then synth_folder will be the path where
   # resampled data will be placed.
-  prefix_folder: "/nm-raid/audio/work/unegi"
+  prefix_folder: "/work/unegi2s/"
   synth_folder: "data/dcase/dataset/dcase_synth/audio/train/synthetic21_train/soundscapes_16k/"
   synth_folder_44k: "data/dcase/dataset/dcase_synth/audio/train/synthetic21_train/soundscapes/"
   synth_tsv:  "data/dcase/dataset/dcase_synth/metadata/train/synthetic21_train/soundscapes.tsv"
@@ -103,3 +103,4 @@ hts-at:
 classes_num: 10
 swin_pretrain_path: "ckpt_hts-at/HTSAT_AudioSet_Saved_2.ckpt"
 panns_pretrain_path: "ckpt_panns/Cnn14_DecisionLevelAtt_mAP0.425.pth"
+hdf_file: "/work/unegi2s/dcase_sed_data.hdf5"
