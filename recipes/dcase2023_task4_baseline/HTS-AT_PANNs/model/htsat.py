@@ -894,7 +894,7 @@ class HTSAT_Swin_Transformer(nn.Module):
             x = self.avgpool(x)
             x = torch.flatten(x, 1)
 
-            if self.config.loss_type_frame == "clip_ce":
+            if self.config.loss_type_frame == "clip":
                 output_dict = {
                     "framewise_output": fpx,  # already sigmoided
                     "clipwise_output": x,

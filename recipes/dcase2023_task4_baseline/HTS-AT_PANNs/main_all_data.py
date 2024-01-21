@@ -201,11 +201,10 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logging.info("device: " + device)
 
-    data = prepare_all_data(configs["data"])
-
     hdf_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), configs["hdf_file"])
 
     if is_hdf5_empty(hdf_file_path):
+        data = prepare_all_data(configs["data"])
         create_hdf_file(data, hdf_file_path, sr=SAMPLE_RATE)
 
     h5py_file = h5py.File(hdf_file_path, "r")
@@ -213,9 +212,6 @@ if __name__ == "__main__":
     train_data = h5py_file["train"]
     eval_data = h5py_file["eval"]
     test_data = h5py_file["test"]
-    
-    print("===================")
-    print(train_data)
 
     train_dataset_strong = SEDDataset_Strong(
         transformation=None,
@@ -253,7 +249,7 @@ if __name__ == "__main__":
     tot_train_data = [train_dataset_strong_synth, train_dataset_weak]
     print(len(train_dataset_weak))
     train_dataset = torch.utils.data.ConcatDataset(tot_train_data)
-    batch_sizes = [4, 2]
+    batch_sizes = configs["training"]["batch_sizes"]
     samplers = [torch.utils.data.RandomSampler(x) for x in tot_train_data]
     batch_sampler = ConcatDatasetBatchSampler(samplers, batch_sizes)
 
@@ -303,7 +299,7 @@ if __name__ == "__main__":
     batch_sizes_val = [6,6]
     total_eval_data = [eval_dataset_synth, eval_dataset_weak]
     val_data = torch.utils.data.ConcatDataset(total_eval_data)
-    val_data = torch.utils.data.Subset(val_data, np.arange(8))
+    #val_data = torch.utils.data.Subset(val_data, np.arange(8))
     #sampler_eval = [torch.utils.data.RandomSampler(x) for x in total_eval_data]
     #batch_sampler_val = ConcatDatasetBatchSampler(sampler_eval, batch_sizes_val)
     
@@ -313,7 +309,7 @@ if __name__ == "__main__":
         train_dataset = Subset(train_dataset, np.arange(10))
         val_dataset = Subset(eval_dataset, np.arange(5))
         eval_dataset = Subset(test_dataset, np.arange(3))"""
-    test_dataset = Subset(test_dataset, np.arange(3))
+    #test_dataset = Subset(test_dataset, np.arange(3))
     # batch_sizes_all_data = [1, 1]
 
     # print("***********************************")
@@ -340,8 +336,7 @@ if __name__ == "__main__":
         accelerator="gpu",
         #gpus=None,  # For running locally,
         gpus=[0],
-        max_epochs=1,
-        # max_epochs=configs["training"]["max_epoch"],
+        max_epochs=configs["training"]["max_epoch"],
         auto_lr_find=False,
         sync_batchnorm=True,
         num_sanity_val_steps=0,

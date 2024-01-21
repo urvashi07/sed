@@ -14,8 +14,8 @@ dataset_type = "audioset"  # "audioset" "esc-50" "scv2"
 index_type = "full_train"  # only works for audioset
 balanced_data = True  # only works for audioset
 
-loss_type_frame = "clip_ce"  #
-loss_type_class = "clip_bce"
+loss_type_frame = "mse"#"clip_ce"  #
+loss_type_class = "mse" #"clip_bce"
 # AudioSet & SCV2: "clip_bce" |  ESC-50: "clip_ce"
 
 # trained from a checkpoint, or evaluate a single model

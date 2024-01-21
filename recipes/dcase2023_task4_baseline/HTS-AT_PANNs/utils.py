@@ -129,12 +129,17 @@ def d_prime(auc):
     d_prime = stats.norm().ppf(auc) * np.sqrt(2.0)
     return d_prime
 
+def mse(pred, target):
+    return F.mse_loss(pred, target)
+
 
 def get_loss_func(loss_type):
     if loss_type == 'clip_bce':
         return clip_bce
     if loss_type == 'clip_ce':
         return clip_ce
+    if loss_type == "mse":
+        return mse
     if loss_type == 'asl_loss':
         loss_func = AsymmetricLoss(gamma_neg=4, gamma_pos=0,clip=0.05)
         return loss_func
