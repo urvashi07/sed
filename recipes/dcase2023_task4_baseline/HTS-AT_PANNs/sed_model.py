@@ -80,7 +80,6 @@ class SEDWrapper(pl.LightningModule):
         self.class_loss_func = get_loss_func(config.loss_type_class)
         self.writer = SummaryWriter()
         self.learning_rate = config.learning_rate
-        print(self.device)
         self.get_weak_f1_seg_macro = torchmetrics.classification.f_beta.MultilabelF1Score(
             len(self.config.classes2id), average="macro"
         ).to(self.device)
@@ -187,7 +186,11 @@ class SEDWrapper(pl.LightningModule):
             return {"acc": acc}
 
     def forward(self, x, mix_lambda=None):
-        output_dict = self.sed_model(x, mix_lambda)
+        if isinstance(x, list):
+            tensor_x = torch.stack(x)
+            output_dict = self.sed_model(tensor_x, mix_lambda)
+        else:
+            output_dict = self.sed_model(x, mix_lambda)
         return output_dict["clipwise_output"], output_dict["framewise_output"]
 
     def inference(self, x):
@@ -200,41 +203,44 @@ class SEDWrapper(pl.LightningModule):
         return output_dict
 
     def training_step(self, batch, batch_idx):
-        indx_synth, indx_weak = [4,2]
+        indx_synth, indx_weak = self.configs["training"]["batch_sizes"]
         self.device_type = next(self.parameters()).device
-        loss_frame = 0
-        loss_class = 0
-        if isinstance(batch, list):
-            indx_synth, indx_weak = [4,2]
-            print(batch)
-            batch_num = len(batch)
-            audio_name, audio, label = batch["audio_name"], batch["waveform"], batch["target"]
-            strong_mask = torch.zeros(batch_num).bool()
-            weak_mask = torch.zeros(batch_num).bool()
-            strong_mask[:indx_synth] = 1
-            weak_mask[indx_synth : indx_weak + indx_synth] = 1
+        batch_num = len(batch)
+        audio_name, audio, label = batch["audio_name"], batch["waveform"], batch["target"]
+        strong_mask = torch.zeros(batch_num).bool()
+        weak_mask = torch.zeros(batch_num).bool()
+        strong_mask[:indx_synth] = 1
+        weak_mask[indx_synth : indx_weak + indx_synth] = 1
         ##if self.config.dataset_type == "audioset":
         ##mix_lambda = torch.from_numpy(get_mix_lambda(0.5, len(batch["waveform"]))).to(self.device_type)
         # else:
-            mix_lambda = None
+        mix_lambda = None
 
         # Another Choice: also mixup the target, but AudioSet is not a perfect data
         # so "adding noise" might be better than purly "mix"
         # batch["target_frames"] = do_mixup_label(batch["target_frames"])
         # batch["target_frames"] = do_mixup(batch["target_frames"], mix_lambda)
-            pred_clip, pred_frame = self(audio, mix_lambda)
+        pred_clip, pred_frame = self(audio, mix_lambda)
         # loss = self.loss_func(pred_clip, batch["target_frames"])
         # pred_frame = pred_frame.float()
 
         
 
-            target = batch["target"].float()
+        #target = batch["target"].float()
         #target_classes = batch["target_classes"]
-            loss_frame = self.frame_loss_func(pred_frame[strong_mask], target[strong_mask])
-            loss_class = self.class_loss_func(pred_clip[weak_mask], target[weak_mask])
-            loss = loss_frame + loss_class
-            self.log("train_loss", loss, on_epoch=True, prog_bar=True)
-            return loss
+        target_frame = torch.stack(label[:indx_synth]).float()
+        target_class = torch.stack(label[indx_synth : indx_weak + indx_synth]).float()
+        loss_frame = self.frame_loss_func(pred_frame[:indx_synth], target_frame)
+        loss_class = self.class_loss_func(pred_clip[indx_synth : indx_weak + indx_synth], target_class)
+        #loss_frame = self.frame_loss_func(pred_frame[strong_mask], target[strong_mask])
+        #loss_class = self.class_loss_func(pred_clip[weak_mask], target[weak_mask])
+        loss = loss_frame + loss_class
+        self.log("train/loss_strong", loss_frame, on_epoch=True, prog_bar=True)
+        self.log("train/loss_weak", loss_class, on_epoch=True, prog_bar=True)
+        self.log("train/train_loss", loss, on_epoch=True, prog_bar=True)
+        self.writer.add_scalar('train_loss',
+                                        loss)
+        return loss
 
     # def training_epoch_end(self, outputs):
     # Change: SWA, deprecated
@@ -270,9 +276,12 @@ class SEDWrapper(pl.LightningModule):
             self.log("val/weak/loss_weak", loss_class)
 
             # accumulate f1 score for weak labels
+            #print("Pred clip")
+            #print(pred_clip[mask_weak].shape)
+            #print("labels")
+            #print(labels[mask_weak].float().shape)
             self.get_weak_f1_seg_macro(
-                pred_clip[mask_weak], labels[mask_weak].long()
-            )
+                pred_clip[mask_weak], labels[mask_weak].float())
 
         mask_synth = (
             torch.tensor(
@@ -287,7 +296,12 @@ class SEDWrapper(pl.LightningModule):
         )
 
         if torch.any(mask_synth):
-            loss_strong = self.frame_loss_func(
+            if config.loss_type_frame == "clip_bce":
+                loss_strong = self.frame_loss_func(
+                    pred_frame[mask_synth].float(), labels[mask_synth].float()
+                                                        )
+            else:
+                loss_strong = self.frame_loss_func(
                 pred_frame[mask_synth], labels[mask_synth]
             )
             self.log("val/synth/loss_strong", loss_strong)
@@ -370,10 +384,11 @@ class SEDWrapper(pl.LightningModule):
             synth_event_f1_macro = sedeval_metrics[0]
             synth_event_f1 = sedeval_metrics[1]
 
-            for keys, values in sedeval_metrics[2].items():
-                if keys == "class_wise":
-                    for class_name, metrics in values.items():
-                        class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]
+            if isinstance(sedeval_metrics, dict):
+                for keys, values in sedeval_metrics[2].items():
+                    if keys == "class_wise":
+                        for class_name, metrics in values.items():
+                            class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]
             
             
         else:
@@ -422,7 +437,7 @@ class SEDWrapper(pl.LightningModule):
             self.log(
                 "weak_f1", weak_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False
             )
-            self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=True)
+            #self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=True)
             self.log("event_f1_macro", synth_event_f1_macro, on_epoch=True, prog_bar=False)
             self.log("event_f1", synth_event_f1, on_epoch=True, prog_bar=True)
             """self.log(
@@ -441,6 +456,7 @@ class SEDWrapper(pl.LightningModule):
             )"""
             # self.log("precision", metric_dict["precision"], on_epoch = True, prog_bar=True, sync_dist=False)
             # self.log("recall", metric_dict["recall"], on_epoch = True, prog_bar=True, sync_dist=False)
+            #
             #self.log(
             #    "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
             #)
@@ -627,12 +643,13 @@ class SEDWrapper(pl.LightningModule):
         ))
             event_f1_macro = sedeval_metrics[0]
             event_f1 = sedeval_metrics[1]
-            for keys, values in sedeval_metrics[2].items():
-                if keys == "class_wise":
-                    for class_name, metrics in values.items():
-                        class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]
-            metric_dict["class_wise_f1"] = class_wise_f1
-            self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=False)
+            if isinstance(sedeval_metrics[2], dict):
+                for keys, values in sedeval_metrics[2].items():
+                    if keys == "class_wise":
+                        for class_name, metrics in values.items():
+                            class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]
+                metric_dict["class_wise_f1"] = class_wise_f1
+                self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=False)
             self.log("event_f1_macro", event_f1_macro, on_epoch=True, prog_bar=True)
             self.log("event_f1", event_f1, on_epoch=True, prog_bar=True)
             """self.log(

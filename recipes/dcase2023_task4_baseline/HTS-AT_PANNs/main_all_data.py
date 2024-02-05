@@ -41,7 +41,7 @@ from models import Cnn14_DecisionLevelMax
 
 from model.htsat import HTSAT_Swin_Transformer
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar
 import warnings
 from collections import OrderedDict
 import argparse
@@ -64,6 +64,7 @@ from prepare_data import prepare_all_data
 from create_hdf_file import create_hdf_file
 import h5py
 
+
 print(torch.cuda.is_available())
 
 def is_hdf5_empty(file_path):
@@ -79,9 +80,9 @@ def custom_collate(batch):
     targets = [item["target"] for item in batch]
 
     return {
-        "audio_names": audio_names,
-        "waveforms": waveforms,
-        "targets": targets,
+        "audio_name": audio_names,
+        "waveform": waveforms,
+        "target": targets,
     }
 
 
@@ -151,9 +152,9 @@ if __name__ == "__main__":
 
     log_dir = ""
     if args.model == "panns":
-        log_dir = os.path.join("./logs", "panns_strong")
+        log_dir = os.path.join("./logs", "panns_all_data")
     elif args.model == "hts-at" or args.model == "htsat":
-        log_dir = os.path.join("./logs", "hts-at_strong")
+        log_dir = os.path.join("./logs", "hts-at_all_data")
     else:
         print(args.model + " not defined currently. Only PANNs and HTS-AT defined.")
         sys.exit()
@@ -221,8 +222,6 @@ if __name__ == "__main__":
         config=configs,
         device=device,
     )
-
-    print(train_dataset_strong[0])
 
     train_dataset_synth = SEDDataset_Strong(
         transformation=None,
@@ -296,7 +295,7 @@ if __name__ == "__main__":
     # print(val_dataset[0]["waveform"].shape)
 
     tb_logger = pl.loggers.TensorBoardLogger(save_dir=log_dir, name=args.model)
-    batch_sizes_val = [6,6]
+    #batch_sizes_val = [6,6]
     total_eval_data = [eval_dataset_synth, eval_dataset_weak]
     val_data = torch.utils.data.ConcatDataset(total_eval_data)
     #val_data = torch.utils.data.Subset(val_data, np.arange(8))
@@ -321,14 +320,17 @@ if __name__ == "__main__":
 
     print("..............................")
 
-
     checkpoint_callback = ModelCheckpoint(
         monitor="mAP",
-        dirpath="checkpoints/l-{epoch:d}-{mAP:.3f}",
+        dirpath= os.path.join(log_dir, "checkpoints"),
         # filename='l-{epoch:d}-{mAP:.3f}',
         save_top_k=2,
         mode="max",
     )
+
+    early_stop = EarlyStopping(
+                    monitor="mAP", patience=configs["training"]["early_stop_patience"],
+                    verbose=True, mode="max")
 
     trainer = pl.Trainer(
         deterministic=False,
@@ -337,12 +339,13 @@ if __name__ == "__main__":
         #gpus=None,  # For running locally,
         gpus=[0],
         max_epochs=configs["training"]["max_epoch"],
-        auto_lr_find=False,
+        auto_lr_find=True,
         sync_batchnorm=True,
         num_sanity_val_steps=0,
         # resume_from_checkpoint = config.resume_checkpoint,
         gradient_clip_val=1.0,
         logger=tb_logger,
+        callbacks=[checkpoint_callback, early_stop, TQDMProgressBar(refresh_rate=5000)]
     )
 
     pretrain_path = ""
@@ -396,16 +399,16 @@ if __name__ == "__main__":
 
     model.learning_rate = LEARNING_RATE
 
-    trainer.tune(model, datamodule=sed_data)
-    sed_data.setup("fit")
-    suggested_lr = (
-        model.learning_rate
-    )  # Access the suggested learning rate from the model
-    print(f"Suggested learning rate: {model.learning_rate:.2e}")
+    #trainer.tune(model, datamodule=sed_data)
+    #sed_data.setup("fit")
+    #suggested_lr = (
+    #    model.learning_rate
+    #)  # Access the suggested learning rate from the model
+    #print(f"Suggested learning rate: {model.learning_rate:.2e}")
 
     if pretrain_path is not None:  # train with pretrained model
         if args.model == "hts-at" or args.model == "htsat":
-            ckpt = torch.load(pretrain_path, map_location="cpu")
+            ckpt = torch.load(pretrain_path)
             ckpt["state_dict"].pop("sed_model.head.weight")
             ckpt["state_dict"].pop("sed_model.head.bias")
             # finetune on the esc and spv2 dataset
@@ -414,7 +417,7 @@ if __name__ == "__main__":
             model.load_state_dict(ckpt["state_dict"], strict=False)
 
         elif args.model == "panns":
-            ckpt = torch.load(pretrain_path, map_location="cpu")
+            ckpt = torch.load(pretrain_path)
             model.load_state_dict(ckpt["model"], strict=False)
 
     trainer.fit(model, sed_data.train_dataloader(), sed_data.val_dataloader())

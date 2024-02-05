@@ -24,8 +24,8 @@ training:
   obj_metric_synth_type: intersection
   precision: 32
   enable_progress_bar: True
-  reduce_dataset_size: True
-  max_epoch: 50
+  reduce_dataset_size: False
+  max_epoch: 25
   batch_size: 64
   random_seed: 2023
 scaler:
@@ -60,6 +60,9 @@ data: # change with your paths if different.
   test_dur: "data/dcase/dataset/metadata/validation/validation_durations.tsv"
   eval_folder: "data/dcase/dataset/audio/eval21_16k"
   eval_folder_44k: "data/dcase/dataset/audio/eval21"
+  ckpt_panns: "/home/unegi2s/Documents/slurm/all_data/loss-bce/panns/epochs_50/epoch=44-step=23670.ckpt"
+    #ckpt_panns: "/home/unegi2s/Documents/slurm/all_data/loss-bce/panns/epochs_25/epoch=21-step=11572-v1.ckpt"
+  ckpt_htsat: "/home/unegi2s/Documents/slurm/all_data/loss-bce/htsat/epochs_25/"
   audio_max_len: 10
   fs: 16000
   net_subsample: 4
@@ -101,6 +104,8 @@ hts-at:
   htsat_dim: 96 
   htsat_depth: [2,2,6,2]
 classes_num: 10
+  #swin_pretrain_path: None
 swin_pretrain_path: "ckpt_hts-at/HTSAT_AudioSet_Saved_4.ckpt"
 panns_pretrain_path: "ckpt_panns/Cnn14_DecisionLevelAtt_mAP0.425.pth"
+  #panns_pretrain_path: None
 hdf_file: "/work/unegi2s/dcase_sed_data.hdf5"
