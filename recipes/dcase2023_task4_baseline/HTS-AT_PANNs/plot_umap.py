@@ -19,8 +19,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     print(args.dir_path)
+    output_dir = os.path.join(args.dir_path, "umap_plots")
+    pattern = r"\w\_(\d+)\_(\d+\.\d+)"
     filenames = os.listdir(args.dir_path)
-    output_dir = os.path.join(args.dir_path, "plot_tsne")
     print(filenames)
     print("****************")
     print(output_dir)
@@ -31,11 +32,11 @@ if __name__ == "__main__":
         filepath = os.path.join(args.dir_path, file_name)
         if os.path.isfile(filepath):
             #print(filepath)
-            digits = re.findall(r'\d+', file_name)
-        
-            #filepath = os.path.join(args.dir_path, file_name)
-            per = digits[0]
-            ite = digits[1]
+            match = re.search(pattern, file_name)
+            if match:
+                neighbour = match.group(1)
+                distance = match.group(2)
+
             #print("perplexity = " +str(per))
             #print("iteration = " +str(ite))        
             df = pd.read_csv(filepath, sep = "\t")
@@ -47,11 +48,8 @@ if __name__ == "__main__":
             plt.figure(figsize=(10, 8))
             for i, label_column in enumerate(label_columns):
             # Filter the DataFrame to include only rows where the label column is 1.0
-                #print("******Label*************")
-                #print(label_column)
                 filtered_data = df[df[label_column] == 1.0]
                 if not filtered_data.empty:
-                    #print(label_column + " is not empty")
                     sns.scatterplot(
                     x='X', y='Y',
                     data=filtered_data,
@@ -60,9 +58,9 @@ if __name__ == "__main__":
                     color=label_colors[i]
                     )
 
-            plt.title('Scatter Plot for TSNE Perplexity: ' +str(per) + "_iteration:" + str(ite))
+            plt.title('Scatter Plot for UMAP Neighbour: ' +str(neighbour) + " and distance:" + str(distance))
             plt.legend()
             plt.show()
-            plt.savefig(os.path.join(output_dir, str(per)+ "_"+ str(ite) +'.png'))
-            print("saved: " +os.path.join(output_dir, str(per)+ "_"+ str(ite) +'.png'))
+            plt.savefig(os.path.join(output_dir, str(neighbour)+ "_"+ str(distance) +'.png'))
+            print("saved: " +os.path.join(output_dir, str(neighbour)+ "_"+ str(distance) +'.png'))
             plt.close()

@@ -31,12 +31,13 @@ import matplotlib.pyplot as plt
 
 # import seaborn as sns
 import pandas as pd
-from torchmetrics.classification import MulticlassConfusionMatrix
+from torchmetrics.classification import MultilabelF1Score, MultilabelAveragePrecision, MultilabelConfusionMatrix
 import config
 
 from desed_task.evaluation.evaluation_measures import (
     compute_per_intersection_macro_f1,
     compute_psds_from_operating_points,
+    compute_psds_from_scores
 )
 
 
@@ -61,7 +62,7 @@ from torchmetrics.functional import f1_score
 import torchmetrics
 from tqdm import tqdm
 import yaml
-
+import sed_scores_eval
 from torchcontrib.optim import SWA
 
 def frame_to_time(frame):
@@ -83,6 +84,13 @@ class SEDWrapper(pl.LightningModule):
         self.get_weak_f1_seg_macro = torchmetrics.classification.f_beta.MultilabelF1Score(
             len(self.config.classes2id), average="macro"
         ).to(self.device)
+        self.multilabel_f1_val = MultilabelF1Score(num_labels=len(self.config.classes2id), average='macro').to(self.device)
+        self.multilabel_f1_test = MultilabelF1Score(num_labels=len(self.config.classes2id), average='macro').to(self.device)
+        self.multilabel_f1_test_classes = MultilabelF1Score(num_labels=len(self.config.classes2id), average='none').to(self.device)
+        self.mAP_val = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="macro", thresholds=None).to(self.device)
+        self.mAP_test = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="macro", thresholds=None).to(self.device)
+        self.mAP_test_classes = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="none", thresholds=None).to(self.device)
+        self.confmat = MultilabelConfusionMatrix(num_labels=len(self.config.classes2id), threshold = 0.1).to(self.device)
         #self.df_eval = df_eval
         #self.df_test = df_test
         self.prefix_folder = prefix_folder
@@ -96,8 +104,30 @@ class SEDWrapper(pl.LightningModule):
         with open(conf_file_path, "r") as f:
             self.configs = yaml.safe_load(f)
         # for weak labels we simply compute f1 score
-        self.val_decoded_pred = pd.DataFrame(columns=["filename", "event_label", "onset", "offset"])
-        self.test_decoded_pred = pd.DataFrame(columns=["filename", "event_label", "onset", "offset"])
+        self.val_decoded_pred = {}
+        self.test_decoded_pred = {}
+        self.pred_clip_test = torch.Tensor().to(self.device)
+        self.labels_frame2class_test = torch.Tensor().to(self.device)
+        self.get_weak_f1_seg_macro_test = torchmetrics.classification.f_beta.MultilabelF1Score(
+                            len(self.config.classes2id), average="macro"
+                                    ).to(self.device)
+
+        self.thresholds = self.configs["training"]["thresholds"]
+        self.test_scores_postprocessed = {}
+        self.test_psds_buffer = pd.DataFrame()
+        self.test_decoded_buffer = pd.DataFrame()
+        self.val_scores_postprocessed = {}
+        self.val_psds_buffer = pd.DataFrame()
+        self.val_decoded_buffer = pd.DataFrame()
+        self.val_buffer_synth = {}
+        self.test_buffer_synth = {}
+        for th in self.thresholds:
+            self.test_buffer_synth[th] = pd.DataFrame()
+            self.val_buffer_synth[th] = pd.DataFrame()
+            self.val_decoded_pred[th] = pd.DataFrame()
+            self.test_decoded_pred[th] = pd.DataFrame()
+
+        print(self.test_decoded_pred.keys())
     
 
     def evaluate_metric(self, pred_target_dict):
@@ -282,6 +312,8 @@ class SEDWrapper(pl.LightningModule):
             #print(labels[mask_weak].float().shape)
             self.get_weak_f1_seg_macro(
                 pred_clip[mask_weak], labels[mask_weak].float())
+            self.multilabel_f1_val(pred_clip[mask_weak], labels[mask_weak].long())
+            self.mAP_val(pred_clip[mask_weak], labels[mask_weak].long())
 
         mask_synth = (
             torch.tensor(
@@ -304,10 +336,17 @@ class SEDWrapper(pl.LightningModule):
                 loss_strong = self.frame_loss_func(
                 pred_frame[mask_synth], labels[mask_synth]
             )
+
             self.log("val/synth/loss_strong", loss_strong)
-        #print(mask_weak)
-        #print(pred_clip[mask_weak])
-        # accumulate f1 score for weak labels
+            labels_frame2class = torch.any(labels == 1, dim=1).int().squeeze()
+            
+            if len(labels_frame2class.shape) < 2:
+                labels_frame2class = labels_frame2class.unsqueeze(0) 
+            
+            self.mAP_val(pred_clip, labels_frame2class)
+            #print(mask_weak)
+            #print(pred_clip[mask_weak])
+            # accumulate f1 score for weak labels
 
             filenames_synth = [
                 x
@@ -315,12 +354,26 @@ class SEDWrapper(pl.LightningModule):
                 if Path(x).parent == Path(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_folder"]))
             ]
             filenames_synth = [os.path.basename(file_path) for file_path in filenames_synth]
-            decoded_strong = batched_decode_preds(
+            
+            (
+            scores_raw_strong, scores_postprocessed_strong,
+            decoded_strong,
+            ) = batched_decode_preds(pred_frame,filenames_synth, hop_length = self.configs["feats"]["hop_length"],
+                    sr = self.configs["feats"]["sample_rate"], median_filter=self.configs["training"]["median_window"],
+                    thresholds=self.thresholds)
+            self.val_scores_postprocessed.update(scores_postprocessed_strong)
+
+            for th in self.thresholds:
+                self.val_buffer_synth[th] = pd.concat([self.val_buffer_synth[th], decoded_strong[th]], ignore_index=True)
+                self.val_decoded_pred[th] = pd.concat([self.val_decoded_pred[th], decoded_strong[th]], 
+                                                                                                  ignore_index = True)
+
+            """decoded_strong = batched_decode_preds(
             pred_frame, filenames_synth, thresholds=0.4, median_filter=7, pad_indx=None,
             hop_length = self.configs["feats"]["hop_length"], sr = self.configs["feats"]["sample_rate"]
             )
             self.val_decoded_pred = pd.concat([self.val_decoded_pred, decoded_strong], 
-                                          ignore_index = True)
+                                          ignore_index = True)"""
 
 
         """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
@@ -339,8 +392,38 @@ class SEDWrapper(pl.LightningModule):
 
     def validation_epoch_end(self, validation_step_outputs):
         weak_f1_macro = self.get_weak_f1_seg_macro.compute()
+        f1_multilabel = self.multilabel_f1_val.compute()
+        mAP_val = self.mAP_val.compute()
         self.device_type = next(self.parameters()).device
 
+        ground_truth = sed_scores_eval.io.read_ground_truth_events(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_tsv"]))      
+        audio_durations = sed_scores_eval.io.read_audio_durations(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_dur"]))
+        
+        ground_truth = {
+                        audio_id: gt for audio_id, gt in ground_truth.items()
+                        if len(gt) > 0
+                        }
+        audio_durations = {
+                            audio_id: audio_durations[audio_id] for audio_id in ground_truth.keys()
+                        }
+        psds1_sed_scores_eval = compute_psds_from_scores(
+                            self.val_scores_postprocessed,
+                            ground_truth,
+                            audio_durations,
+                            dtc_threshold=0.7,
+                            gtc_threshold=0.7,
+                            cttc_threshold=None,
+                            alpha_ct=0,
+                            alpha_st=1,
+                            save_dir=os.path.join("psds", "scenario1"),)
+        intersection_f1_macro = compute_per_intersection_macro_f1(
+                            self.val_buffer_synth,
+                            os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_tsv"]),
+                            os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_dur"]),
+                                                            )
+
+        self.log("psds", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
         
         # print(target.shape)
         pred_classes = torch.cat([d[0] for d in validation_step_outputs], dim=0)
@@ -437,6 +520,8 @@ class SEDWrapper(pl.LightningModule):
             self.log(
                 "weak_f1", weak_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False
             )
+            self.log("f1_multilabel", f1_multilabel, on_epoch = True, prog_bar = True)
+            self.log("mAP val", mAP_val, on_epoch = True, prog_bar = True)
             #self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=True)
             self.log("event_f1_macro", synth_event_f1_macro, on_epoch=True, prog_bar=False)
             self.log("event_f1", synth_event_f1, on_epoch=True, prog_bar=True)
@@ -477,6 +562,8 @@ class SEDWrapper(pl.LightningModule):
                 "acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=False
             )
         self.get_weak_f1_seg_macro.reset()
+        self.multilabel_f1_val.reset()
+        self.mAP_val.reset()
         metric_dict = {"mAP": 0.0}
 
     def time_shifting(self, x, shift_len):
@@ -487,8 +574,26 @@ class SEDWrapper(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         self.device_type = next(self.parameters()).device
         preds = []
+        audio_name, audio, labels = batch["audio_name"], batch["waveform"], batch["target"]
+        batch_num = len(batch)
+        pred_clip, pred_frame = self(audio)
+        pred_clip = pred_clip.to(self.device)
+        #print(pred_clip)
+        labels_frame2class = torch.any(labels == 1, dim=1).int().squeeze().to(self.device)
+        if len(labels_frame2class.shape) < 2:
+            labels_frame2class = labels_frame2class.unsqueeze(0).to(self.device)
+        self.labels_frame2class_test = torch.cat((self.labels_frame2class_test.to(self.device), labels_frame2class.to(self.device)), dim=0)
+        self.get_weak_f1_seg_macro_test(pred_clip.to(self.device), labels_frame2class.to(self.device))
+        self.multilabel_f1_test(pred_clip, labels_frame2class)
+        self.multilabel_f1_test_classes(pred_clip, labels_frame2class)
+        self.mAP_test(pred_clip, labels_frame2class)
+        self.mAP_test_classes(pred_clip, labels_frame2class)
+        if len(pred_clip.shape) < 2:
+            pred_clip = pred_clip.unsqueeze(0)
+
+        self.pred_clip_test = torch.cat((self.pred_clip_test.to(self.device), pred_clip.to(self.device)), dim=0)
         # time shifting optimization
-        if self.config.fl_local or self.config.dataset_type != "audioset":
+        """if self.config.fl_local or self.config.dataset_type != "audioset":
             shift_num = 1  # framewise localization cannot allow the time shifting
         else:
             shift_num = 10
@@ -498,7 +603,7 @@ class SEDWrapper(pl.LightningModule):
             preds.append(pred_frame)
             batch["waveform"] = self.time_shifting(
                 batch["waveform"], shift_len=100 * (i + 1)
-            )
+            )"""
         """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
             prediction_df = self.prediction_for_clip(os.path.basename(filename),
                                                 clip=waveform,
@@ -512,13 +617,35 @@ class SEDWrapper(pl.LightningModule):
             ]
         filenames_test = [os.path.basename(file_path) for file_path in filenames_test]
         
-        decoded_strong = batched_decode_preds(
+        """decoded_strong = batched_decode_preds(
         pred_frame, filenames_test, thresholds=0.4, median_filter=7, pad_indx=None,
         hop_length = self.configs["feats"]["hop_length"], sr = self.configs["feats"]["sample_rate"]
         )
         
         self.test_decoded_pred = pd.concat([self.test_decoded_pred, decoded_strong], 
-                                          ignore_index = True)
+                                          ignore_index = True)"""
+
+        (
+         scores_raw_strong, scores_postprocessed_strong,
+         decoded_strong,
+         ) = batched_decode_preds(pred_frame,
+                                  filenames_test,
+                                  hop_length = self.configs["feats"]["hop_length"],
+                                  sr = self.configs["feats"]["sample_rate"],
+                                  median_filter=self.configs["training"]["median_window"],  
+                                  thresholds=self.thresholds,
+                                  )
+        self.test_scores_postprocessed.update(
+                                 scores_postprocessed_strong
+                                             )
+        print(type(decoded_strong))
+        print(decoded_strong.keys())
+        print(type(decoded_strong[0.5]))
+        for th in self.thresholds:
+            self.test_buffer_synth[th] = pd.concat([self.test_buffer_synth[th], decoded_strong[th]], ignore_index=True)
+            self.test_decoded_pred[th] = pd.concat([self.test_decoded_pred[th], decoded_strong[th]], 
+                                                                                               ignore_index = True)
+            
         
         
 
@@ -546,11 +673,69 @@ class SEDWrapper(pl.LightningModule):
         self.device_type = next(self.parameters()).device
         # pred = torch.cat([d[0] for d in test_step_outputs], dim = 0)
         # target = torch.cat([d[1] for d in test_step_outputs], dim = 0)
+        print(".....................................")
+        #print(self.pred_clip_test.long().shape)
+        #print(self.pred_clip_test.long())
+        """conf_mat = self.confmat(self.pred_clip_test.long(), self.labels_frame2class_test.long())
+        confusion_matrices = conf_mat.cpu().numpy()
+        
+        fig, axs = plt.subplots(nrows=2, ncols=5, figsize=(12, 6))
 
+        for i, ax in enumerate(axs.flat):
+            conf_matrix = confusion_matrices[i]
+            im = ax.imshow(conf_matrix, cmap='Blues')
+            for j in range(conf_matrix.shape[0]):
+                for k in range(conf_matrix.shape[1]):
+                    ax.text(k, j, conf_matrix[j, k], ha='center', va='center', color='black')
+            ax.set_title(f'Class {str(config.id2classes[i])}')
+            ax.set_xlabel('Predicted label')
+            ax.set_ylabel('True label')
+            ax.set_xticks([0, 1])
+            ax.set_yticks([0, 1])
+            ax.xaxis.set_ticklabels(['Negative', 'Positive'])
+            ax.yaxis.set_ticklabels(['Negative', 'Positive'])
+        plt.tight_layout()
+        plt.savefig(f'conf_matrix_plots/confusion_matrix_{str(self.configs["training"]["ckpt_epoch"])}_{str(config.model)}.png')
+        # Clear the plot for the next iteration
+        plt.clf()
+        print(conf_mat)"""
+
+        ground_truth = sed_scores_eval.io.read_ground_truth_events(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]))
+        audio_durations = sed_scores_eval.io.read_audio_durations(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]))
+
+        ground_truth = {audio_id: gt for audio_id, gt in ground_truth.items()
+                        if len(gt) > 0
+                         }
+        audio_durations = {audio_id: audio_durations[audio_id]
+                           for audio_id in ground_truth.keys()
+                           }
+                                        
+        psds1_sed_scores_eval = compute_psds_from_scores(
+                                self.test_scores_postprocessed,
+                                ground_truth,
+                                audio_durations,
+                                dtc_threshold=0.7,
+                                gtc_threshold=0.7,
+                                cttc_threshold=None,
+                                alpha_ct=0,
+                                alpha_st=1,
+                                save_dir=os.path.join("psds", "scenario1"),
+                                                                                                                                                                    )
+        intersection_f1_macro = compute_per_intersection_macro_f1(
+                                                                self.test_buffer_synth,
+                                                                os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                                                os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),
+                                                                )
+        self.log("psds", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
         pred_classes = torch.cat([d[0] for d in test_step_outputs], dim=0)
         pred_frame = torch.cat([d[1] for d in test_step_outputs], dim=0)
         target = torch.cat([d[2] for d in test_step_outputs], dim=0)
         target_class = torch.any(target == 1, dim=1).int()
+        multilabel_f1_test = self.multilabel_f1_test.compute()
+        multilabel_f1_test_classes = self.multilabel_f1_test_classes.compute()
+        mAP_test = self.mAP_test.compute()
+        mAP_test_classes = self.mAP_test_classes.compute()
         #target_frame = torch.cat([d[3] for d in test_step_outputs], dim=0)
 
         # print("=====================================")
@@ -637,9 +822,15 @@ class SEDWrapper(pl.LightningModule):
 
             metric_dict = self.evaluate_metric(pred_target_dict)
             self.log("mAP", metric_dict["mAP"], on_epoch=True, prog_bar=True)
-
+            self.log("multilabel f1", multilabel_f1_test, on_epoch=True, prog_bar=True)
+            #self.log("multilabel f1 classes", multilabel_f1_test_classes, on_epoch=True, prog_bar = True)
+            self.log("mAP test", mAP_test, on_epoch=True, prog_bar = True)
+            #self.log("mAP test classes", mAP_test_classes, on_epoch=True, prog_bar = True)
+            for i in range(10):
+                self.log("mAP test class: " + config.id2classes[i] , mAP_test_classes[i], on_epoch=True, prog_bar = True)
+                self.log("multilabel f1 class: " +config.id2classes[i] , multilabel_f1_test_classes[i], on_epoch=True, prog_bar = True)
             sedeval_metrics = log_sedeval_metrics(
-            self.test_decoded_pred, os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["val_tsv"],
+            self.test_decoded_pred[0.5], os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["val_tsv"],
         ))
             event_f1_macro = sedeval_metrics[0]
             event_f1 = sedeval_metrics[1]
@@ -649,7 +840,7 @@ class SEDWrapper(pl.LightningModule):
                         for class_name, metrics in values.items():
                             class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]
                 metric_dict["class_wise_f1"] = class_wise_f1
-                self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=False)
+                #self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=False)
             self.log("event_f1_macro", event_f1_macro, on_epoch=True, prog_bar=True)
             self.log("event_f1", event_f1, on_epoch=True, prog_bar=True)
             """self.log(
@@ -675,6 +866,10 @@ class SEDWrapper(pl.LightningModule):
             # self.log.tb_writer.add_image('Confusion Matrix', metric_dict["confusion_mat"], global_step=self.global_step)
             # self.log("mAUC", metric_dict["mAUC"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             # self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
+            self.multilabel_f1_test.reset()
+            self.multilabel_f1_test_classes.reset()
+            self.mAP_test.reset()
+            self.mAP_test_classes.reset()
         else:
             self.log(
                 "acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=False

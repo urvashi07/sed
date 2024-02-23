@@ -25,9 +25,11 @@ training:
   precision: 32
   enable_progress_bar: True
   reduce_dataset_size: False
-  max_epoch: 25
+  max_epoch: 100
   batch_size: 64
   random_seed: 2023
+  ckpt_epoch: 25
+  thresholds: [0.5]   
 scaler:
   statistic: instance # instance or dataset-wide statistic
   normtype: minmax # minmax or standard or mean normalization
@@ -60,9 +62,11 @@ data: # change with your paths if different.
   test_dur: "data/dcase/dataset/metadata/validation/validation_durations.tsv"
   eval_folder: "data/dcase/dataset/audio/eval21_16k"
   eval_folder_44k: "data/dcase/dataset/audio/eval21"
-  ckpt_panns: "/home/unegi2s/Documents/slurm/all_data/loss-bce/panns/epochs_50/epoch=44-step=23670.ckpt"
-    #ckpt_panns: "/home/unegi2s/Documents/slurm/all_data/loss-bce/panns/epochs_25/epoch=21-step=11572-v1.ckpt"
-  ckpt_htsat: "/home/unegi2s/Documents/slurm/all_data/loss-bce/htsat/epochs_25/"
+  ckpt_panns_50: "/home/unegi2s/Documents/slurm/all_data/loss-bce/panns/epochs_50/epoch=44-step=23670.ckpt" #epochs_50
+  ckpt_panns_25: "/home/unegi2s/Documents/slurm/all_data/loss-bce/panns/epochs_25/epoch=21-step=11572-v1.ckpt" #epochs_25
+  ckpt_htsat_25: "/home/unegi2s/Documents/slurm/all_data/loss-bce/htsat/epochs_25/epoch=24-step=13150.ckpt" #epochs_25
+  ckpt_htsat_50: "/home/unegi2s/Documents/slurm/all_data/loss-bce/htsat/epochs_50/epoch=45-step=24196.ckpt" # epochs_50
+  ckpt_htsat_100: "/home/unegi2s/Documents/slurm/all_data/loss-bce/htsat/epochs_100/epoch=93-step=49444.ckpt" #epochs_100
   audio_max_len: 10
   fs: 16000
   net_subsample: 4

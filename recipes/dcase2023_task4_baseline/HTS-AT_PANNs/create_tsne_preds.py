@@ -77,7 +77,7 @@ if __name__ == "__main__":
     len_dataset = len(test_dataset)
 
     #subset = torch.utils.Subset(test_dataset, np.arange(5))
-    
+    ckpt_path_epoch = str(100) 
     test_dataloader = DataLoader(
             dataset=test_dataset,
             num_workers=configs["training"]["num_workers"],
@@ -102,8 +102,10 @@ if __name__ == "__main__":
         # Fixed in V3
         # model.load_state_dict(weights["model"])
         sed_model.att_block = AttBlock(2048, 10, activation="sigmoid")
+        
+        #ckpt_path = configs["data"]["ckpt_panns_25"]
+        ckpt_path = configs["data"]["ckpt_panns_"+ckpt_path_epoch]
 
-        ckpt_path = configs["data"]["ckpt_panns"]
         
     elif args.model == "hts-at" or args.model == "htsat":
         log_dir = os.path.join("./logs", "hts-at_all_data")
@@ -121,9 +123,11 @@ if __name__ == "__main__":
             num_heads=configs["hts-at"]["htsat_num_head"],
         )
 
-        ckpt_path = configs["data"]["ckpt_htsat"]
+        ckpt_path = configs["data"]["ckpt_htsat_"+ckpt_path_epoch]
+        #ckpt_path = configs["data"]["ckpt_htsat_50"]
+        #ckpt_path = configs["data"]["ckpt_htsat_100"]
 
-    tsne_dir = os.path.join(log_dir, "tsne", "epochs_50")
+    tsne_dir = os.path.join(log_dir, "tsne", "pred", "epochs_" +ckpt_path_epoch)
 
     if not os.path.exists(tsne_dir):
         os.mkdir(tsne_dir)
@@ -146,6 +150,7 @@ if __name__ == "__main__":
     embeddings["panns"] = torch.Tensor()
     embeddings["htsat"] = torch.Tensor()
     labels_frame2class_all = torch.Tensor()
+    pred_clip_all = torch.Tensor()
     labels_class = []
 
     def hook(module, input, output):
@@ -162,18 +167,25 @@ if __name__ == "__main__":
     with torch.no_grad():
         model.eval()
         for batch in test_dataloader:
-            outputs = model(batch["waveform"])
+            pred_clip, pred_frame = model(batch["waveform"])
+            #pred_clip = outputs["clipwise_output"]
             labels_frame2class = torch.any(batch["target"] == 1, dim=1).int().squeeze()
             if len(labels_frame2class.shape) < 2:
                 labels_frame2class = labels_frame2class.unsqueeze(0)
+            if len(pred_clip.shape) < 2:#added
+                pred_clip = pred_clip.unsqueeze(0)#added
             #print(labels_frame2class.shape)
             labels_frame2class_all = torch.cat((labels_frame2class_all, labels_frame2class), dim=0)
+            pred_clip_all = torch.cat((pred_clip_all, pred_clip), dim=0)
 
     # Remove the hook
     hook_handle.remove()
     scaler = MinMaxScaler()
-
-    df_label = pd.DataFrame(labels_frame2class_all, columns=[config.id2classes[i] for i in range(labels_frame2class_all.shape[1])])
+    
+    threshold = 0.4
+    pred_clip_binary = (pred_clip_all > threshold).int()
+    df_pred = pd.DataFrame(pred_clip_binary, columns=[config.id2classes[i] for i in range(pred_clip_binary.shape[1])])
+    #df_label = pd.DataFrame(labels_frame2class_all, columns=[config.id2classes[i] for i in range(labels_frame2class_all.shape[1])])
     #tsne_dfs = {}
     for i, perplexity in enumerate(perplexities):
         for j, iteration in enumerate(iterations):
@@ -189,7 +201,7 @@ if __name__ == "__main__":
             #scaler.fit(X_embedded)
             #X_embedded_scaled = scaler.transform(X_embedded)
             #data_scaled = pd.DataFrame(X_embedded_scaled, columns = ["X", "Y"])
-            result_df = pd.concat([data, df_label], axis=1)
+            result_df = pd.concat([data, df_pred], axis=1)
             #result_df_scaled = pd.concat([data_scaled, df_label], axis=1)
             filename_csv = "tsne_" + str(perplexity) + "_" + str(iteration) + ".csv"
             #filename_csv_scaled = "tsne_scaled_" + str(perplexity) + "_" + str(iteration)

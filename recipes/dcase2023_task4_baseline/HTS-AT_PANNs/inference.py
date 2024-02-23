@@ -5,6 +5,8 @@ import numpy as np
 import config
 import sed_eval
 import os
+from sed_scores_eval.utils.scores import create_score_dataframe
+from dcase_util.data import DecisionEncoder
 
 def get_event_list_current_file(df, fname):
     """
@@ -195,67 +197,75 @@ def find_contiguous_regions(activity_array):
 def _frame_to_time(frame, hop_length, sr):
         return (frame * hop_length) / sr
 
-
 def decode_strong(labels, hop_length, sr):
-        """ Decode the encoded strong labels
+    """ Decode the encoded strong labels
         Args:
             labels: numpy.array, the encoded labels to be decoded
         Returns:
             list
             Decoded labels, list of list: [[label, onset offset], ...]
+     """
+    result_labels = []
+    for i, label_column in enumerate(labels.T):
+        change_indices = DecisionEncoder().find_contiguous_regions(label_column)
 
-        """
-        result_labels = []
-        
-        for i, label_column in enumerate(labels):
-            change_indices = find_contiguous_regions(label_column)
-            # append [label, onset, offset] in the result list
-            for row in change_indices:
-                result_labels.append(
-                    [
-                        config.id2classes[i],
-                        max(0.0, _frame_to_time(row[0], hop_length, sr)),
-                        min(10.0, _frame_to_time(row[1], hop_length, sr)),
-                    ]
-                )
-        return result_labels
+        # append [label, onset, offset] in the result list
+        for row in change_indices:
+            result_labels.append(
+                [
+                 list(config.classes2id.keys())[i],
+                 _frame_to_time(row[0], hop_length, sr),
+                 _frame_to_time(row[1], hop_length, sr),
+                ]
+              )
+    return result_labels
+
 
 def batched_decode_preds(
-    
-    strong_preds, filenames, thresholds=0.5, median_filter=7, pad_indx=None, hop_length = 320, sr = 16000
-):
+            strong_preds, filenames, hop_length, sr, thresholds=[0.5], median_filter=7, pad_indx=None,
+            ):
     """ Decode a batch of predictions to dataframes. Each threshold gives a different dataframe and stored in a
-    dictionary
+            dictionary
 
-    Args:
-        strong_preds: torch.Tensor, batch of strong predictions.
-        filenames: list, the list of filenames of the current batch.
-        encoder: ManyHotEncoder object, object used to decode predictions.
-        thresholds: list, the list of thresholds to be used for predictions.
-        median_filter: int, the number of frames for which to apply median window (smoothing).
-        pad_indx: list, the list of indexes which have been used for padding.
+        Args:
+                strong_preds: torch.Tensor, batch of strong predictions.
+                filenames: list, the list of filenames of the current batch.
+                encoder: ManyHotEncoder object, object used to decode predictions.
+                thresholds: list, the list of thresholds to be used for predictions.
+                median_filter: int, the number of frames for which to apply median window (smoothing).
+                pad_indx: list, the list of indexes which have been used for padding.
 
-    Returns:
-        dict of predictions, each keys is a threshold and the value is the DataFrame of predictions.
+        Returns:
+                dict of predictions, each keys is a threshold and the value is the DataFrame of predictions.
     """
-    # Init a dataframe per threshold
-    prediction_dfs = pd.DataFrame(columns=["filename", "event_label", "onset", "offset"])
-    #for threshold in thresholds:
-        #prediction_dfs[threshold] = pd.DataFrame()
-
+    scores_raw = {}
+    scores_postprocessed = {}
+    prediction_dfs = {}
+    labels = list(config.classes2id.keys())
+    for threshold in thresholds:
+        prediction_dfs[threshold] = pd.DataFrame()
     for j in range(strong_preds.shape[0]):  # over batches
-        #for c_th in thresholds:
-        c_preds = strong_preds[j]
+        audio_id = Path(filenames[j]).stem
+        filename = audio_id + ".wav"
+        c_scores = strong_preds[j]
         if pad_indx is not None:
-                true_len = int(c_preds.shape[-1] * pad_indx[j].item())
-                c_preds = c_preds[:true_len]
-        pred = c_preds.transpose(0, 1).detach().cpu().numpy()
-        pred = pred > thresholds
-        pred = scipy.ndimage.filters.median_filter(pred, (median_filter, 1))
-        pred = decode_strong(pred, hop_length, sr)
-        pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
-        pred["filename"] = filenames[j]
-        prediction_dfs = pd.concat([prediction_dfs, pred], ignore_index=True)
-        #prediction_dfs[c_th] = prediction_dfs[c_th].append(pred, ignore_index=True)
+            true_len = int(c_scores.shape[-1] * pad_indx[j].item())
+            c_scores = c_scores[:true_len]
+        c_scores = c_scores.detach().cpu().numpy()
+        scores_raw[audio_id] = create_score_dataframe(scores=c_scores,
+                                                    timestamps=_frame_to_time(np.arange(len(c_scores)+1), hop_length, sr),
+                                                    event_classes=labels,
+                                                                            )
+        c_scores = scipy.ndimage.filters.median_filter(c_scores, (median_filter, 1))
+        scores_postprocessed[audio_id] = create_score_dataframe(scores=c_scores,
+                                                                timestamps=_frame_to_time(np.arange(len(c_scores)+1), hop_length, sr),
+                                                                event_classes=labels,
+                                                                            )
+        for c_th in thresholds:
+            pred = c_scores > c_th
+            pred = decode_strong(pred, hop_length, sr)
+            pred = pd.DataFrame(pred, columns=["event_label", "onset", "offset"])
+            pred["filename"] = filename
+            prediction_dfs[c_th] = pd.concat([prediction_dfs[c_th], pred], ignore_index=True)
+    return scores_raw, scores_postprocessed, prediction_dfs
 
-    return prediction_dfs

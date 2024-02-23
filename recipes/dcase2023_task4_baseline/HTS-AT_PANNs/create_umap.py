@@ -48,6 +48,7 @@ if __name__ == "__main__":
     h5py_file = h5py.File(hdf_file_path, "r")
 
     test_data = h5py_file["test"]
+    ckpt_epoch = str(100)
 
     SAMPLE_RATE = configs["data"]["fs"]
     N_FFT = configs["feats"]["n_window"]
@@ -103,7 +104,7 @@ if __name__ == "__main__":
         # model.load_state_dict(weights["model"])
         sed_model.att_block = AttBlock(2048, 10, activation="sigmoid")
 
-        ckpt_path = configs["data"]["ckpt_panns"]
+        ckpt_path = configs["data"]["ckpt_panns_" + ckpt_epoch]
         
     elif args.model == "hts-at" or args.model == "htsat":
         log_dir = os.path.join("./logs", "hts-at_all_data")
@@ -121,12 +122,13 @@ if __name__ == "__main__":
             num_heads=configs["hts-at"]["htsat_num_head"],
         )
 
-        ckpt_path = configs["data"]["ckpt_htsat"]
+        ckpt_path = configs["data"]["ckpt_htsat_" + ckpt_epoch]
 
-    tsne_dir = os.path.join(log_dir, "tsne", "epochs_50")
+    umap_dir = os.path.join(log_dir, "umap", "pred", "epochs_" + ckpt_epoch)
+    print("umap dir: " +(umap_dir))
 
-    if not os.path.exists(tsne_dir):
-        os.mkdir(tsne_dir)
+    if not os.path.exists(umap_dir):
+        os.mkdir(umap_dir)
         
     ckpt = torch.load(ckpt_path)
     model = SEDWrapper(
@@ -156,32 +158,40 @@ if __name__ == "__main__":
             embeddings["htsat"] = torch.cat((embeddings["htsat"], output), dim=0)
 
     hook_handle = desired_layer.register_forward_hook(hook)
-    perplexities = [2, 25, 50, 100, 200]
-    iterations = [250, 500, 1000, 2000, 5000]
-    
+    neighbours = [5, 10, 15, 45]
+    distances = [0.000, 0.001, 0.01, 0.1, 0.5]
+    pred_clip_all = torch.Tensor()
+
     with torch.no_grad():
         model.eval()
         for batch in test_dataloader:
-            outputs = model(batch["waveform"])
+            pred_clip, _ = model(batch["waveform"])
             labels_frame2class = torch.any(batch["target"] == 1, dim=1).int().squeeze()
             if len(labels_frame2class.shape) < 2:
                 labels_frame2class = labels_frame2class.unsqueeze(0)
+            if len(pred_clip.shape) < 2:
+                pred_clip = pred_clip.unsqueeze(0)
             #print(labels_frame2class.shape)
+            pred_clip_all = torch.cat((pred_clip_all, pred_clip), dim=0)
             labels_frame2class_all = torch.cat((labels_frame2class_all, labels_frame2class), dim=0)
 
     # Remove the hook
     hook_handle.remove()
     scaler = MinMaxScaler()
-
-    df_label = pd.DataFrame(labels_frame2class_all, columns=[config.id2classes[i] for i in range(labels_frame2class_all.shape[1])])
+    
+    threshold = 0.4
+    pred_clip_binary = (pred_clip_all > threshold).int()
+    df_pred = pd.DataFrame(pred_clip_binary, columns=[config.id2classes[i] for i in range(pred_clip_binary.shape[1])])
+    #df_label = pd.DataFrame(labels_frame2class_all, columns=[config.id2classes[i] for i in range(labels_frame2class_all.shape[1])])
     #tsne_dfs = {}
-    for i, perplexity in enumerate(perplexities):
-        for j, iteration in enumerate(iterations):
+    for i, neighbour in enumerate(neighbours):
+        for j, distance in enumerate(distances):
             if args.model == "panns":
-                X_embedded = TSNE(n_components=2, perplexity=perplexity, n_iter=iteration).fit_transform(embeddings["panns"].view(len_dataset, -1))
+                X_embedded = umap.UMAP(n_neighbors=neighbour, min_dist=distance, metric='correlation').fit_transform(embeddings["panns"].view(len_dataset, -1))
+           
                 
             elif args.model == "hts-at" or args.model == "htsat":
-                X_embedded = TSNE(n_components=2, perplexity=perplexity, n_iter=iteration).fit_transform(embeddings["htsat"].view(len_dataset, -1))
+                X_embedded = umap.UMAP(n_neighbors=neighbour, min_dist=distance, metric='correlation').fit_transform(embeddings["htsat"].view(len_dataset, -1))
                 #print(X_embedded)
             
 
@@ -189,12 +199,13 @@ if __name__ == "__main__":
             #scaler.fit(X_embedded)
             #X_embedded_scaled = scaler.transform(X_embedded)
             #data_scaled = pd.DataFrame(X_embedded_scaled, columns = ["X", "Y"])
-            result_df = pd.concat([data, df_label], axis=1)
+            result_df = pd.concat([data, df_pred], axis=1)
+            #result_df = pd.concat([data, df_label], axis=1)
             #result_df_scaled = pd.concat([data_scaled, df_label], axis=1)
-            filename_csv = "tsne_" + str(perplexity) + "_" + str(iteration) + ".csv"
+            filename_csv = "umap_" + str(neighbour) + "_" + str(distance) + ".csv"
             #filename_csv_scaled = "tsne_scaled_" + str(perplexity) + "_" + str(iteration)
             print("Saving file: " +(filename_csv))
-            result_df.to_csv(os.path.join(tsne_dir, filename_csv), sep = "\t")
+            result_df.to_csv(os.path.join(umap_dir, filename_csv), sep = "\t")
             #result_df_scaled.to_csv(os.path.join(tsne_dir, filename_csv_scaled), sep = "\t")
             #tsne_dfs[perplexity] = {iteration: result_df}
             data = pd.DataFrame
