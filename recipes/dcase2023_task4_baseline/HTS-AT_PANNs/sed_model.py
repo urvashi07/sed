@@ -113,6 +113,10 @@ class SEDWrapper(pl.LightningModule):
                                     ).to(self.device)
 
         self.thresholds = self.configs["training"]["thresholds"]
+        test_n_thresholds = self.configs["training"]["n_test_thresholds"]
+        self.test_thresholds = np.arange(1 / (test_n_thresholds * 2), 1, 1 / test_n_thresholds
+                                        )
+        #print(self.test_thresholds)
         self.test_scores_postprocessed = {}
         self.test_psds_buffer = pd.DataFrame()
         self.test_decoded_buffer = pd.DataFrame()
@@ -121,13 +125,17 @@ class SEDWrapper(pl.LightningModule):
         self.val_decoded_buffer = pd.DataFrame()
         self.val_buffer_synth = {}
         self.test_buffer_synth = {}
-        for th in self.thresholds:
+        self.test_psds_buffer = {k: pd.DataFrame() for k in self.test_thresholds}
+        self.decoded_05_buffer = pd.DataFrame()
+        self.test_scores_raw_buffer = {}
+        #self.test_scores_postprocessed_buffer = {}
+        """for th in self.test_thresholds:
             self.test_buffer_synth[th] = pd.DataFrame()
             self.val_buffer_synth[th] = pd.DataFrame()
             self.val_decoded_pred[th] = pd.DataFrame()
-            self.test_decoded_pred[th] = pd.DataFrame()
+            self.test_decoded_pred[th] = pd.DataFrame()"""
 
-        print(self.test_decoded_pred.keys())
+        #print(self.test_decoded_pred.keys())
     
 
     def evaluate_metric(self, pred_target_dict):
@@ -360,10 +368,10 @@ class SEDWrapper(pl.LightningModule):
             decoded_strong,
             ) = batched_decode_preds(pred_frame,filenames_synth, hop_length = self.configs["feats"]["hop_length"],
                     sr = self.configs["feats"]["sample_rate"], median_filter=self.configs["training"]["median_window"],
-                    thresholds=self.thresholds)
+                    thresholds=self.test_thresholds)
             self.val_scores_postprocessed.update(scores_postprocessed_strong)
 
-            for th in self.thresholds:
+            for th in self.test_thresholds:
                 self.val_buffer_synth[th] = pd.concat([self.val_buffer_synth[th], decoded_strong[th]], ignore_index=True)
                 self.val_decoded_pred[th] = pd.concat([self.val_decoded_pred[th], decoded_strong[th]], 
                                                                                                   ignore_index = True)
@@ -633,19 +641,20 @@ class SEDWrapper(pl.LightningModule):
                                   hop_length = self.configs["feats"]["hop_length"],
                                   sr = self.configs["feats"]["sample_rate"],
                                   median_filter=self.configs["training"]["median_window"],  
-                                  thresholds=self.thresholds,
+                                  thresholds=list(self.test_psds_buffer.keys()) + [.5],
                                   )
-        self.test_scores_postprocessed.update(
-                                 scores_postprocessed_strong
-                                             )
-        print(type(decoded_strong))
-        print(decoded_strong.keys())
-        print(type(decoded_strong[0.5]))
-        for th in self.thresholds:
-            self.test_buffer_synth[th] = pd.concat([self.test_buffer_synth[th], decoded_strong[th]], ignore_index=True)
-            self.test_decoded_pred[th] = pd.concat([self.test_decoded_pred[th], decoded_strong[th]], 
-                                                                                               ignore_index = True)
-            
+        self.test_scores_raw_buffer.update(scores_raw_strong)
+        self.test_scores_postprocessed.update(scores_postprocessed_strong)
+        
+        #print(type(decoded_strong))
+        #print(decoded_strong.keys())
+        #print(self.test_psds_buffer.keys())
+        #print(type(decoded_strong[0.5]))
+        for th in self.test_psds_buffer.keys():
+            self.test_psds_buffer[th] = pd.concat([self.test_psds_buffer[th], decoded_strong[th]], ignore_index=True)
+            #self.test_decoded_pred[th] = pd.concat([self.test_decoded_pred[th], decoded_strong[th]], 
+            #                                                                                   ignore_index = True)
+        self.decoded_05_buffer = pd.concat([self.decoded_05_buffer, decoded_strong[0.5]])
         
         
 
@@ -670,6 +679,18 @@ class SEDWrapper(pl.LightningModule):
 
     def test_epoch_end(self, test_step_outputs):
         # print(test_step_outputs.shape)
+        save_dir = os.path.join("/home/unegi2s/Documents/predictions/", config.model)
+        save_dir_raw = os.path.join(save_dir, "scores_raw")
+        sed_scores_eval.io.write_sed_scores(self.test_scores_raw_buffer, save_dir_raw)
+        print(f"\nRaw scores saved in: {save_dir_raw}")
+        save_dir_postprocessed = os.path.join(save_dir, "postprocessed")
+        sed_scores_eval.io.write_sed_scores(self.test_scores_postprocessed, save_dir_postprocessed)
+        print(f"\nPostprocessed scores saved in: {save_dir_postprocessed}")
+        #print(self.test_psds_buffer.keys())
+        #print("................")
+        #print(self.test_decoded_pred.keys())
+        for th in self.test_psds_buffer.keys():
+            self.test_psds_buffer[th].to_csv(save_dir + "/predictions_" + str(th) + ".tsv", sep = "\t")
         self.device_type = next(self.parameters()).device
         # pred = torch.cat([d[0] for d in test_step_outputs], dim = 0)
         # target = torch.cat([d[1] for d in test_step_outputs], dim = 0)
@@ -709,7 +730,18 @@ class SEDWrapper(pl.LightningModule):
         audio_durations = {audio_id: audio_durations[audio_id]
                            for audio_id in ground_truth.keys()
                            }
-                                        
+        #print(self.test_psds_buffer) 
+        psds1_psds_eval = compute_psds_from_operating_points(
+                                  self.test_psds_buffer,
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),
+                                  dtc_threshold=0.7,
+                                  gtc_threshold=0.7,
+                                  alpha_ct=0,
+                                  alpha_st=1,
+                                  save_dir=os.path.join(save_dir, "scenario1", "psds_eval"),
+                                                                                                                                                            )
+        #print(self.test_scores_postprocessed)
         psds1_sed_scores_eval = compute_psds_from_scores(
                                 self.test_scores_postprocessed,
                                 ground_truth,
@@ -719,14 +751,50 @@ class SEDWrapper(pl.LightningModule):
                                 cttc_threshold=None,
                                 alpha_ct=0,
                                 alpha_st=1,
-                                save_dir=os.path.join("psds", "scenario1"),
-                                                                                                                                                                    )
+                                save_dir=os.path.join(save_dir, "scenario1", "sed_eval"),
+                                                                
+                                )
+
+        psds2_psds_eval = compute_psds_from_operating_points(
+                                  self.test_psds_buffer,
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),
+                                  dtc_threshold=0.1,
+                                  gtc_threshold=0.1,
+                                  cttc_threshold=0.3,
+                                  alpha_ct=0.5,
+                                  alpha_st=1,
+                                  save_dir=os.path.join(save_dir, "scenario2", "psds_eval"),
+                                                 )
+        psds2_sed_scores_eval = compute_psds_from_scores(
+                                        self.test_scores_postprocessed,
+                                        ground_truth,
+                                        audio_durations,
+                                        dtc_threshold=0.1,
+                                        gtc_threshold=0.1,
+                                        cttc_threshold=0.3,
+                                        alpha_ct=0.5,
+                                        alpha_st=1,
+                                        save_dir=os.path.join(save_dir, "scenario2", "sed_eval"),
+                                                                                                                                                                            )
+
+        event_macro = log_sedeval_metrics(
+                              self.decoded_05_buffer,
+                              os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                              save_dir)[0]
         intersection_f1_macro = compute_per_intersection_macro_f1(
-                                                                self.test_buffer_synth,
-                                                                os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
-                                                                os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),
-                                                                )
-        self.log("psds", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+                                        {"0.5": self.decoded_05_buffer},
+                                        os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                        os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),)
+        best_test_result = torch.tensor(max(psds1_psds_eval, psds2_psds_eval))
+        
+
+        self.log("psds1", psds1_psds_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("psds1_sed_scores", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("psds2", psds2_psds_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("psds2_sed_scores", psds2_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("best_psds", best_test_result, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("event_macro", event_macro, on_epoch=True, prog_bar=True, sync_dist=False)
         self.log("intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
         pred_classes = torch.cat([d[0] for d in test_step_outputs], dim=0)
         pred_frame = torch.cat([d[1] for d in test_step_outputs], dim=0)
@@ -830,7 +898,7 @@ class SEDWrapper(pl.LightningModule):
                 self.log("mAP test class: " + config.id2classes[i] , mAP_test_classes[i], on_epoch=True, prog_bar = True)
                 self.log("multilabel f1 class: " +config.id2classes[i] , multilabel_f1_test_classes[i], on_epoch=True, prog_bar = True)
             sedeval_metrics = log_sedeval_metrics(
-            self.test_decoded_pred[0.5], os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["val_tsv"],
+            self.decoded_05_buffer, os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["val_tsv"],
         ))
             event_f1_macro = sedeval_metrics[0]
             event_f1 = sedeval_metrics[1]

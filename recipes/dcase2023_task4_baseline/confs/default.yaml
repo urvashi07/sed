@@ -29,7 +29,7 @@ training:
   batch_size: 64
   random_seed: 2023
   ckpt_epoch: 25
-  thresholds: [0.5]   
+  thresholds: [0.1, 0.2, 0.3, 0.4, 0.5]   
 scaler:
   statistic: instance # instance or dataset-wide statistic
   normtype: minmax # minmax or standard or mean normalization
