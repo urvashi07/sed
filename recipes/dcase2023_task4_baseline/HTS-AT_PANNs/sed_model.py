@@ -64,6 +64,7 @@ from tqdm import tqdm
 import yaml
 import sed_scores_eval
 from torchcontrib.optim import SWA
+from copy import deepcopy
 
 def frame_to_time(frame):
         hop_length = 320
@@ -72,7 +73,7 @@ def frame_to_time(frame):
 
 
 class SEDWrapper(pl.LightningModule):
-    def __init__(self, sed_model, config, prefix_folder):
+    def __init__(self, sed_model, sed_teacher, config, prefix_folder, opt, scheduler):
         super().__init__()
         self.sed_model = sed_model
         self.config = config
@@ -86,11 +87,11 @@ class SEDWrapper(pl.LightningModule):
         ).to(self.device)
         self.multilabel_f1_val = MultilabelF1Score(num_labels=len(self.config.classes2id), average='macro').to(self.device)
         self.multilabel_f1_test = MultilabelF1Score(num_labels=len(self.config.classes2id), average='macro').to(self.device)
-        self.multilabel_f1_test_classes = MultilabelF1Score(num_labels=len(self.config.classes2id), average='none').to(self.device)
+        #self.multilabel_f1_test_classes = MultilabelF1Score(num_labels=len(self.config.classes2id), average='none').to(self.device)
         self.mAP_val = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="macro", thresholds=None).to(self.device)
         self.mAP_test = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="macro", thresholds=None).to(self.device)
-        self.mAP_test_classes = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="none", thresholds=None).to(self.device)
-        self.confmat = MultilabelConfusionMatrix(num_labels=len(self.config.classes2id), threshold = 0.1).to(self.device)
+        #self.mAP_test_classes = MultilabelAveragePrecision(num_labels=len(self.config.classes2id), average="none", thresholds=None).to(self.device)
+        #self.confmat = MultilabelConfusionMatrix(num_labels=len(self.config.classes2id), threshold = 0.1).to(self.device)
         #self.df_eval = df_eval
         #self.df_test = df_test
         self.prefix_folder = prefix_folder
@@ -104,7 +105,7 @@ class SEDWrapper(pl.LightningModule):
         with open(conf_file_path, "r") as f:
             self.configs = yaml.safe_load(f)
         # for weak labels we simply compute f1 score
-        self.val_decoded_pred = {}
+        self.val_decoded_pred = {k: pd.DataFrame() for k in self.configs["training"]["val_thresholds"]}
         self.test_decoded_pred = {}
         self.pred_clip_test = torch.Tensor().to(self.device)
         self.labels_frame2class_test = torch.Tensor().to(self.device)
@@ -123,20 +124,53 @@ class SEDWrapper(pl.LightningModule):
         self.val_scores_postprocessed = {}
         self.val_psds_buffer = pd.DataFrame()
         self.val_decoded_buffer = pd.DataFrame()
-        self.val_buffer_synth = {}
+        self.val_buffer_synth = {k: pd.DataFrame() for k in self.configs["training"]["val_thresholds"]}
         self.test_buffer_synth = {}
         self.test_psds_buffer = {k: pd.DataFrame() for k in self.test_thresholds}
         self.decoded_05_buffer = pd.DataFrame()
         self.test_scores_raw_buffer = {}
-        #self.test_scores_postprocessed_buffer = {}
-        """for th in self.test_thresholds:
-            self.test_buffer_synth[th] = pd.DataFrame()
-            self.val_buffer_synth[th] = pd.DataFrame()
-            self.val_decoded_pred[th] = pd.DataFrame()
-            self.test_decoded_pred[th] = pd.DataFrame()"""
+        
+        self.opt = opt
+        self.scheduler = scheduler
 
         #print(self.test_decoded_pred.keys())
-    
+        self.student_teacher_model = self.configs["student_teacher_model"]
+        if self.student_teacher_model:
+            if sed_teacher == None:
+                self.sed_teacher = deepcopy(sed_model)
+            else:
+                self.sed_teacher = sed_teacher
+                self.sed_teacher.load_state_dict(sed_model.state_dict())
+            self.get_weak_f1_seg_macro_teacher = torchmetrics.classification.f_beta.MultilabelF1Score(
+                            len(self.config.classes2id), average="macro"
+                                    ).to(self.device)
+            self.val_buffer_synth_teacher = {k: pd.DataFrame() for k in self.configs["training"]["val_thresholds"]}
+            self.val_scores_postprocessed_teacher = {}            
+            self.test_buffer_synth_teacher = {}
+            self.test_psds_buffer_teacher = {k: pd.DataFrame() for k in self.test_thresholds}
+            self.decoded_05_buffer_teacher = pd.DataFrame()
+            self.test_scores_raw_buffer_teacher = {}
+            self.test_scores_postprocessed_teacher = {}
+            
+            for param in self.sed_teacher.parameters():
+                param.detach_()
+            
+    def update_ema(self, alpha, global_step, model, ema_model):
+        """ Update teacher model parameters
+
+        Args:
+            alpha: float, the factor to be used between each updated step.
+            global_step: int, the current global step to be used.
+            model: torch.Module, student model to use
+            ema_model: torch.Module, teacher model to use
+        """
+        # Use the true average until the exponential average is more correct
+        alpha = min(1 - 1 / (global_step + 1), alpha)
+        for ema_params, params in zip(ema_model.parameters(), model.parameters()):
+            ema_params.data.mul_(alpha).add_(params.data, alpha=1 - alpha)
+            
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
+        scheduler.step()
 
     def evaluate_metric(self, pred_target_dict):
         ap = []
@@ -273,12 +307,50 @@ class SEDWrapper(pl.LightningModule):
         #loss_frame = self.frame_loss_func(pred_frame[strong_mask], target[strong_mask])
         #loss_class = self.class_loss_func(pred_clip[weak_mask], target[weak_mask])
         loss = loss_frame + loss_class
+        if self.student_teacher_model:
+            with torch.no_grad():
+                if isinstance(audio, list):
+                    tensor_audio = torch.stack(audio)
+                    output_dict = self.sed_teacher(tensor_audio)
+                else:
+                    output_dict = self.sed_teacher(audio)
+                pred_clip_teacher = output_dict["clipwise_output"]
+                pred_frame_teacher = output_dict["framewise_output"]
+            
+                loss_frame_teacher = self.frame_loss_func(pred_frame_teacher[:indx_synth], target_frame)
+                loss_class_teacher = self.class_loss_func(pred_clip_teacher[indx_synth : indx_weak + indx_synth], target_class)
+            
+            weight = (
+                self.configs["training"]["const_max"]
+                * self.scheduler["scheduler"]._get_scaling_factor()
+                )
+        
+
+            strong_loss_teacher = self.frame_loss_func(
+            pred_frame, pred_frame_teacher.detach()
+            )
+            weak_loss_teacher = self.class_loss_func(
+            pred_clip, pred_clip_teacher.detach()
+            )
+        
+            tot_self_loss = (strong_loss_teacher + weak_loss_teacher) * weight
+
+            tot_loss = loss + tot_self_loss
+            self.log("train/loss_strong_teacher", loss_frame_teacher, on_epoch=True, prog_bar=True)
+            self.log("train/loss_weak_teacher", loss_class_teacher, on_epoch=True, prog_bar=True)
+            self.log("train/total_loss_student_teacher", tot_loss, on_epoch=True, prog_bar=True)
+        
         self.log("train/loss_strong", loss_frame, on_epoch=True, prog_bar=True)
         self.log("train/loss_weak", loss_class, on_epoch=True, prog_bar=True)
         self.log("train/train_loss", loss, on_epoch=True, prog_bar=True)
         self.writer.add_scalar('train_loss',
                                         loss)
-        return loss
+        self.log("train/lr", self.opt.param_groups[-1]["lr"], prog_bar=True)
+        self.log("train/step", self.scheduler["scheduler"].step_num, prog_bar=True)
+        if self.student_teacher_model:
+            return tot_loss
+        else:
+            return loss
 
     # def training_epoch_end(self, outputs):
     # Change: SWA, deprecated
@@ -287,12 +359,23 @@ class SEDWrapper(pl.LightningModule):
     #         continue
     #     opt.swap_swa_sgd()
     # self.dataset.generate_queue()
+    def on_before_zero_grad(self, *args, **kwargs):
+        # update EMA teacher
+        self.update_ema(
+            self.configs["training"]["ema_factor"],
+            self.scheduler["scheduler"].step_num,
+            self.sed_model,
+            self.sed_teacher,
+        )
 
     def validation_step(self, batch, batch_idx):
         audio_name, audio, labels = batch["audio_name"], batch["waveform"], batch["target"]
         batch_num = len(batch)
         pred_clip, pred_frame = self(audio)
         target = labels
+        if self.student_teacher_model:
+            output_dict = self.sed_teacher(audio)
+            pred_clip_teacher, pred_frame_teacher = output_dict["clipwise_output"], output_dict["framewise_output"]
         
         mask_weak = (
             torch.tensor(
@@ -312,6 +395,13 @@ class SEDWrapper(pl.LightningModule):
             #print(labels[mask_weak].dtype)
             loss_class = self.class_loss_func(pred_clip[mask_weak], labels[mask_weak].float())
             self.log("val/weak/loss_weak", loss_class)
+            
+            if self.student_teacher_model:
+                loss_class_teacher = self.class_loss_func(pred_clip_teacher[mask_weak], labels[mask_weak].float())
+                self.log("val/weak/loss_weak_teacher", loss_class_teacher)
+                
+                self.get_weak_f1_seg_macro_teacher(
+                pred_clip_teacher[mask_weak], labels[mask_weak].float())
 
             # accumulate f1 score for weak labels
             #print("Pred clip")
@@ -344,6 +434,12 @@ class SEDWrapper(pl.LightningModule):
                 loss_strong = self.frame_loss_func(
                 pred_frame[mask_synth], labels[mask_synth]
             )
+            
+            if self.student_teacher_model:
+                loss_strong_teacher = self.frame_loss_func(
+                    pred_frame_teacher[mask_synth].float(), labels[mask_synth].float()
+                                                        )
+                self.log("val/synth/loss_strong_teacher", loss_strong_teacher)
 
             self.log("val/synth/loss_strong", loss_strong)
             labels_frame2class = torch.any(labels == 1, dim=1).int().squeeze()
@@ -366,31 +462,37 @@ class SEDWrapper(pl.LightningModule):
             (
             scores_raw_strong, scores_postprocessed_strong,
             decoded_strong,
-            ) = batched_decode_preds(pred_frame,filenames_synth, hop_length = self.configs["feats"]["hop_length"],
-                    sr = self.configs["feats"]["sample_rate"], median_filter=self.configs["training"]["median_window"],
-                    thresholds=self.test_thresholds)
+            ) = batched_decode_preds(pred_frame,
+                                     filenames_synth, 
+                                     hop_length = self.configs["feats"]["hop_length"],
+                                    sr = self.configs["feats"]["sample_rate"], 
+                                    median_filter=self.configs["training"]["median_window"],
+                                    thresholds=self.val_buffer_synth.keys())
             self.val_scores_postprocessed.update(scores_postprocessed_strong)
-
-            for th in self.test_thresholds:
+            for th in self.val_buffer_synth.keys():
                 self.val_buffer_synth[th] = pd.concat([self.val_buffer_synth[th], decoded_strong[th]], ignore_index=True)
                 self.val_decoded_pred[th] = pd.concat([self.val_decoded_pred[th], decoded_strong[th]], 
                                                                                                   ignore_index = True)
+        
+        
+            if self.student_teacher_model:
+                (
+                scores_raw_teacher_strong, scores_postprocessed_teacher_strong,
+                decoded_teacher_strong,
+                ) = batched_decode_preds(
+                                    pred_frame_teacher[mask_synth],
+                                    filenames_synth, 
+                                    hop_length = self.configs["feats"]["hop_length"],
+                                    sr = self.configs["feats"]["sample_rate"], 
+                                    median_filter=self.configs["training"]["median_window"],
+                                    thresholds=list(self.val_buffer_synth_teacher.keys()))
 
-            """decoded_strong = batched_decode_preds(
-            pred_frame, filenames_synth, thresholds=0.4, median_filter=7, pad_indx=None,
-            hop_length = self.configs["feats"]["hop_length"], sr = self.configs["feats"]["sample_rate"]
-            )
-            self.val_decoded_pred = pd.concat([self.val_decoded_pred, decoded_strong], 
-                                          ignore_index = True)"""
-
-
-        """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
-            prediction_df = self.prediction_for_clip(os.path.basename(filename),
-                                                clip=waveform,
-                                                threshold=0.5)
-            self.prediction_dfs.append(prediction_df)"""
-        # self.log()
-        # pred_target_dict = {"pred" : [pred_clip.detach(), pred_frame.detach()], "target": [batch["target_classes"].detach(), batch["target_frames"].detach()] }
+                self.val_scores_postprocessed_teacher.update(
+                scores_postprocessed_teacher_strong
+                )
+                for th in self.val_buffer_synth_teacher.keys():
+                    self.val_buffer_synth_teacher[th] = pd.concat([self.val_buffer_synth_teacher[th], decoded_teacher_strong[th]], ignore_index=True)   
+        
         return [
             pred_clip.detach(),
             pred_frame.detach(),
@@ -400,6 +502,26 @@ class SEDWrapper(pl.LightningModule):
 
     def validation_epoch_end(self, validation_step_outputs):
         weak_f1_macro = self.get_weak_f1_seg_macro.compute()
+        self.log(
+                "val/weak_f1", weak_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False
+            )
+        save_dir = os.path.join("/work/unegi2s/predictions/student_teacher/val/", config.model)
+        #print(self.val_decoded_pred)
+        if self.student_teacher_model:
+            weak_f1_macro_teacher = self.get_weak_f1_seg_macro_teacher.compute()
+            self.log(
+                "val/weak_f1_teacher", weak_f1_macro_teacher, on_epoch=True, prog_bar=True, sync_dist=False
+            )
+            intersection_f1_macro_teacher = compute_per_intersection_macro_f1(
+                            self.val_buffer_synth_teacher,
+                            os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_tsv"]),
+                            os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_dur"]),
+                                                            )
+            self.log(
+                "val/intersection_f1_macro_teacher", intersection_f1_macro_teacher, on_epoch=True, prog_bar=True, sync_dist=False
+            )
+            
+
         f1_multilabel = self.multilabel_f1_val.compute()
         mAP_val = self.mAP_val.compute()
         self.device_type = next(self.parameters()).device
@@ -423,15 +545,57 @@ class SEDWrapper(pl.LightningModule):
                             cttc_threshold=None,
                             alpha_ct=0,
                             alpha_st=1,
-                            save_dir=os.path.join("psds", "scenario1"),)
+                            save_dir=os.path.join(save_dir, "psds", "scenario1"),)
         intersection_f1_macro = compute_per_intersection_macro_f1(
                             self.val_buffer_synth,
                             os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_tsv"]),
                             os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_dur"]),
                                                             )
 
-        self.log("psds", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
+        obj_synth_metric = self.configs["training"]["obj_metric_synth_type"]
+        
+        if obj_synth_metric == "intersection":
+            synth_metric = intersection_f1_macro
+        obj_metric = torch.tensor(weak_f1_macro.item() + synth_metric)
+        
+        """sedeval_metrics = log_sedeval_metrics(
+                self.val_decoded_pred, os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_tsv"],
+                            ))"""
+        synth_event_f1_macro = log_sedeval_metrics(
+                                              self.val_buffer_synth[0.5],
+                                              os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                                save_dir)[0]
+        #synth_event_f1_macro = sedeval_metrics[0]
+        #synth_event_f1 = sedeval_metrics[1]
+
+        """if isinstance(sedeval_metrics, dict):
+            for keys, values in sedeval_metrics[2].items():
+                if keys == "class_wise":
+                    for class_name, metrics in values.items():
+                        class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]"""
+
+        self.log("val/obj_metric", obj_metric, prog_bar=True)
+        
+        self.log("val/psds", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("val/intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
+        
+        
+        self.val_buffer_synth = {
+            k: pd.DataFrame() for k in self.configs["training"]["val_thresholds"]
+        }
+        if self.student_teacher_model:
+            
+            self.val_buffer_synth_teacher = {
+            k: pd.DataFrame() for k in self.configs["training"]["val_thresholds"]
+            }
+            self.val_scores_postprocessed_teacher = {}
+            self.get_weak_f1_seg_macro_teacher.reset()
+            
+        self.val_scores_postprocessed = {}
+        
+
+        self.get_weak_f1_seg_macro.reset()
+        
         
         # print(target.shape)
         pred_classes = torch.cat([d[0] for d in validation_step_outputs], dim=0)
@@ -469,7 +633,7 @@ class SEDWrapper(pl.LightningModule):
                 # "recall": 0.,
                 "f1": 0.0,
             }
-            sedeval_metrics = log_sedeval_metrics(
+            """sedeval_metrics = log_sedeval_metrics(
             self.val_decoded_pred, os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_tsv"],
         ))
             synth_event_f1_macro = sedeval_metrics[0]
@@ -479,41 +643,14 @@ class SEDWrapper(pl.LightningModule):
                 for keys, values in sedeval_metrics[2].items():
                     if keys == "class_wise":
                         for class_name, metrics in values.items():
-                            class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]
+                            class_wise_f1[class_name] = values[class_name]["f_measure"]["f_measure"]"""
             
             
-        else:
-            metric_dict = {"acc": 0.0}
-        """if torch.cuda.device_count() > 1:
-            dist.all_gather(gather_pred, pred)
-            dist.all_gather(gather_target, target)
-            if dist.get_rank() == 0:
-                gather_pred = torch.cat(gather_pred, dim = 0).cpu().numpy()
-                gather_target = torch.cat(gather_target, dim = 0).cpu().numpy()
-                if self.config.dataset_type == "scv2":
-                    gather_target = np.argmax(gather_target, 1)
-                metric_dict = self.evaluate_metric(gather_pred, gather_target)
-                print(self.device_type, dist.get_world_size(), metric_dict, flush = True)
-        
-            if self.config.dataset_type == "audioset":
-                self.log("mAP", metric_dict["mAP"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-                self.log("mAUC", metric_dict["mAUC"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-                self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-            else:
-                self.log("acc", metric_dict["acc"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
-            dist.barrier()
-        else:"""
+
         gather_pred_classes = pred_classes
         gather_pred_frame = pred_frame.cpu().numpy()
         #gather_target_classes = target_classes
         gather_target = target.cpu().numpy()
-        if self.config.dataset_type == "scv2":
-            gather_target = np.argmax(gather_target, 1)
-            metric_dict = self.evaluate_metric(
-                gather_pred_classes, gather_target_classes
-            )
-            print(self.device_type, metric_dict, flush=True)
-
         pred_target_dict = {
             "pred": [gather_pred_classes, gather_pred_frame],
             "target": [gather_target, target],
@@ -523,16 +660,14 @@ class SEDWrapper(pl.LightningModule):
             metric_dict = self.evaluate_metric(pred_target_dict)
             metric_dict["class_wise_f1"] = class_wise_f1
             self.log(
-                "mAP", metric_dict["mAP"], on_epoch=True, prog_bar=True, sync_dist=False
+                "val/mAP", metric_dict["mAP"], on_epoch=True, prog_bar=True, sync_dist=False
             )
-            self.log(
-                "weak_f1", weak_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False
-            )
-            self.log("f1_multilabel", f1_multilabel, on_epoch = True, prog_bar = True)
-            self.log("mAP val", mAP_val, on_epoch = True, prog_bar = True)
+            
+            self.log("val/f1_multilabel", f1_multilabel, on_epoch = True, prog_bar = True)
+            self.log("val/mAP val", mAP_val, on_epoch = True, prog_bar = True)
             #self.log("class_wise_f1", metric_dict["class_wise_f1"], on_epoch=True, prog_bar=True)
-            self.log("event_f1_macro", synth_event_f1_macro, on_epoch=True, prog_bar=False)
-            self.log("event_f1", synth_event_f1, on_epoch=True, prog_bar=True)
+            self.log("val/event_f1_macro", synth_event_f1_macro, on_epoch=True, prog_bar=False)
+            #self.log("val/event_f1", synth_event_f1, on_epoch=True, prog_bar=True)
             """self.log(
                 "mAUC",
                 metric_dict["mAUC"],
@@ -547,24 +682,6 @@ class SEDWrapper(pl.LightningModule):
                 prog_bar=True,
                 sync_dist=False,
             )"""
-            # self.log("precision", metric_dict["precision"], on_epoch = True, prog_bar=True, sync_dist=False)
-            # self.log("recall", metric_dict["recall"], on_epoch = True, prog_bar=True, sync_dist=False)
-            #
-            #self.log(
-            #    "f1", metric_dict["f1"], on_epoch=True, prog_bar=True, sync_dist=False
-            #)
-            #self.df_eval["event_label"] = self.df_eval["event_label"].map(config.id2classes)
-            #self.prediction_dfs = self.prediction_dfs[0]
-            #print(self.prediction_dfs)
-            #print("********************")
-            #print(self.df_eval)
-            ##event_metrics_s, segment_metrics_s = compute_sed_eval_metrics(self.prediction_dfs, self.df_eval)
-            ##class_wise_f_measure = event_metrics_s.results()["class_wise_average"]["f_measure"]["f_measure"] * 100
-            ##class_wise_f_measure = round(class_wise_f_measure, 2)
-            #print(class_wise_f_measure)
-            ##overall_wise_f_measure = event_metrics_s.results()["overall"]["f_measure"]["f_measure"] * 100
-            ##overall_wise_f_measure = round(overall_wise_f_measure, 2)
-            #print(overall_wise_f_measure)
         else:
             self.log(
                 "acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=False
@@ -573,6 +690,13 @@ class SEDWrapper(pl.LightningModule):
         self.multilabel_f1_val.reset()
         self.mAP_val.reset()
         metric_dict = {"mAP": 0.0}
+        if self.student_teacher_model:
+            return obj_metric
+        
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["sed_model"] = self.sed_model.state_dict()
+        checkpoint["sed_teacher"] = self.sed_teacher.state_dict()
+        return checkpoint
 
     def time_shifting(self, x, shift_len):
         shift_len = int(shift_len)
@@ -586,6 +710,11 @@ class SEDWrapper(pl.LightningModule):
         batch_num = len(batch)
         pred_clip, pred_frame = self(audio)
         pred_clip = pred_clip.to(self.device)
+        
+        if self.student_teacher_model:
+            output_dict = self.sed_teacher(audio)
+            pred_clip_teacher, pred_frame_teacher = output_dict["clipwise_output"], output_dict["framewise_output"]
+            pred_clip_tecaher = pred_clip_teacher.to(self.device)
         #print(pred_clip)
         labels_frame2class = torch.any(labels == 1, dim=1).int().squeeze().to(self.device)
         if len(labels_frame2class.shape) < 2:
@@ -593,30 +722,14 @@ class SEDWrapper(pl.LightningModule):
         self.labels_frame2class_test = torch.cat((self.labels_frame2class_test.to(self.device), labels_frame2class.to(self.device)), dim=0)
         self.get_weak_f1_seg_macro_test(pred_clip.to(self.device), labels_frame2class.to(self.device))
         self.multilabel_f1_test(pred_clip, labels_frame2class)
-        self.multilabel_f1_test_classes(pred_clip, labels_frame2class)
+        #self.multilabel_f1_test_classes(pred_clip, labels_frame2class)
         self.mAP_test(pred_clip, labels_frame2class)
-        self.mAP_test_classes(pred_clip, labels_frame2class)
+        #self.mAP_test_classes(pred_clip, labels_frame2class)
         if len(pred_clip.shape) < 2:
             pred_clip = pred_clip.unsqueeze(0)
 
         self.pred_clip_test = torch.cat((self.pred_clip_test.to(self.device), pred_clip.to(self.device)), dim=0)
-        # time shifting optimization
-        """if self.config.fl_local or self.config.dataset_type != "audioset":
-            shift_num = 1  # framewise localization cannot allow the time shifting
-        else:
-            shift_num = 10
-        for i in range(shift_num):
-            pred_clip, pred_frame = self(batch["waveform"])
-            # preds.append(pred_clip.unsqueeze(0))
-            preds.append(pred_frame)
-            batch["waveform"] = self.time_shifting(
-                batch["waveform"], shift_len=100 * (i + 1)
-            )"""
-        """for filename, waveform in zip(batch["audio_name"], batch["waveform"]):
-            prediction_df = self.prediction_for_clip(os.path.basename(filename),
-                                                clip=waveform,
-                                                threshold=0.5)
-            self.prediction_dfs.append(prediction_df)"""
+
         
         filenames_test = [
                 x
@@ -646,28 +759,34 @@ class SEDWrapper(pl.LightningModule):
         self.test_scores_raw_buffer.update(scores_raw_strong)
         self.test_scores_postprocessed.update(scores_postprocessed_strong)
         
-        #print(type(decoded_strong))
-        #print(decoded_strong.keys())
-        #print(self.test_psds_buffer.keys())
-        #print(type(decoded_strong[0.5]))
+
         for th in self.test_psds_buffer.keys():
             self.test_psds_buffer[th] = pd.concat([self.test_psds_buffer[th], decoded_strong[th]], ignore_index=True)
             #self.test_decoded_pred[th] = pd.concat([self.test_decoded_pred[th], decoded_strong[th]], 
             #                                                                                   ignore_index = True)
         self.decoded_05_buffer = pd.concat([self.decoded_05_buffer, decoded_strong[0.5]])
-        
+        if self.student_teacher_model: 
+            (
+            scores_raw_teacher_strong, scores_postprocessed_teacher_strong,
+            decoded_teacher_strong,
+            ) = batched_decode_preds(pred_frame_teacher,
+                                  filenames_test,
+                                  hop_length = self.configs["feats"]["hop_length"],
+                                  sr = self.configs["feats"]["sample_rate"],
+                                  median_filter=self.configs["training"]["median_window"],  
+                                  thresholds=list(self.test_psds_buffer.keys()) + [.5],
+                                  )
+            self.test_scores_raw_buffer_teacher.update(scores_raw_teacher_strong)
+            self.test_scores_postprocessed_teacher.update(scores_postprocessed_teacher_strong)
         
 
-        # preds = torch.cat(preds, dim=0)
-        # pred = preds.mean(dim = 0)
-        """if self.config.fl_local:
-            return [
-                pred_clip.detach().cpu().numpy(), 
-                pred_frame.detach().cpu().numpy(),
-                batch["audio_name"],
-                #batch["real_len"].cpu().numpy()
-            ]
-        else:"""
+            for th in self.test_psds_buffer_teacher.keys():
+                self.test_psds_buffer_teacher[th] = pd.concat([self.test_psds_buffer_teacher[th], decoded_teacher_strong[th]], ignore_index=True)
+            #self.test_decoded_pred[th] = pd.concat([self.test_decoded_pred[th], decoded_strong[th]], 
+            #                                                                                   ignore_index = True)
+            self.decoded_05_buffer_teacher = pd.concat([self.decoded_05_buffer_teacher, decoded_teacher_strong[0.5]])
+
+
         # pred_target_dict = {"pred" : [pred_clip.detach(), pred_frame.detach()], "target": [batch["target_classes"].detach(), batch["target_frames"].detach()] }
         # pred_target_dict = {"pred" : [pred_clip.detach(), pred_frame.detach()], "target": [batch.labels_class_arr.detach(), batch.labels_frames_arr.detach()] }
         return [
@@ -679,7 +798,7 @@ class SEDWrapper(pl.LightningModule):
 
     def test_epoch_end(self, test_step_outputs):
         # print(test_step_outputs.shape)
-        save_dir = os.path.join("/home/unegi2s/Documents/predictions/", config.model)
+        save_dir = os.path.join("/work/unegi2s/predictions/student_teacher", config.model)
         save_dir_raw = os.path.join(save_dir, "scores_raw")
         sed_scores_eval.io.write_sed_scores(self.test_scores_raw_buffer, save_dir_raw)
         print(f"\nRaw scores saved in: {save_dir_raw}")
@@ -697,29 +816,7 @@ class SEDWrapper(pl.LightningModule):
         print(".....................................")
         #print(self.pred_clip_test.long().shape)
         #print(self.pred_clip_test.long())
-        """conf_mat = self.confmat(self.pred_clip_test.long(), self.labels_frame2class_test.long())
-        confusion_matrices = conf_mat.cpu().numpy()
-        
-        fig, axs = plt.subplots(nrows=2, ncols=5, figsize=(12, 6))
 
-        for i, ax in enumerate(axs.flat):
-            conf_matrix = confusion_matrices[i]
-            im = ax.imshow(conf_matrix, cmap='Blues')
-            for j in range(conf_matrix.shape[0]):
-                for k in range(conf_matrix.shape[1]):
-                    ax.text(k, j, conf_matrix[j, k], ha='center', va='center', color='black')
-            ax.set_title(f'Class {str(config.id2classes[i])}')
-            ax.set_xlabel('Predicted label')
-            ax.set_ylabel('True label')
-            ax.set_xticks([0, 1])
-            ax.set_yticks([0, 1])
-            ax.xaxis.set_ticklabels(['Negative', 'Positive'])
-            ax.yaxis.set_ticklabels(['Negative', 'Positive'])
-        plt.tight_layout()
-        plt.savefig(f'conf_matrix_plots/confusion_matrix_{str(self.configs["training"]["ckpt_epoch"])}_{str(config.model)}.png')
-        # Clear the plot for the next iteration
-        plt.clf()
-        print(conf_mat)"""
 
         ground_truth = sed_scores_eval.io.read_ground_truth_events(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]))
         audio_durations = sed_scores_eval.io.read_audio_durations(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]))
@@ -776,7 +873,72 @@ class SEDWrapper(pl.LightningModule):
                                         alpha_ct=0.5,
                                         alpha_st=1,
                                         save_dir=os.path.join(save_dir, "scenario2", "sed_eval"),
-                                                                                                                                                                            )
+                                    )
+        
+        if self.student_teacher_model:
+            psds1_psds_eval_teacher = compute_psds_from_operating_points(
+                                  self.test_psds_buffer_teacher,
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),
+                                  dtc_threshold=0.7,
+                                  gtc_threshold=0.7,
+                                  alpha_ct=0,
+                                  alpha_st=1,
+                                  save_dir=os.path.join(save_dir, "teacher", "scenario1", "psds_eval"),
+                                                                                                                                                            )
+        #print(self.test_scores_postprocessed)
+            psds1_sed_scores_eval_teacher = compute_psds_from_scores(
+                                self.test_scores_postprocessed_teacher,
+                                ground_truth,
+                                audio_durations,
+                                dtc_threshold=0.7,
+                                gtc_threshold=0.7,
+                                cttc_threshold=None,
+                                alpha_ct=0,
+                                alpha_st=1,
+                                save_dir=os.path.join(save_dir, "teacher" "scenario1", "sed_eval"),
+                                                                
+                                )
+
+            psds2_psds_eval_teacher = compute_psds_from_operating_points(
+                                  self.test_psds_buffer_teacher,
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                  os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),
+                                  dtc_threshold=0.1,
+                                  gtc_threshold=0.1,
+                                  cttc_threshold=0.3,
+                                  alpha_ct=0.5,
+                                  alpha_st=1,
+                                  save_dir=os.path.join(save_dir, "teacher", "scenario2", "psds_eval"),
+                                                 )
+            psds2_sed_scores_eval_teacher = compute_psds_from_scores(
+                                        self.test_scores_postprocessed_teacher,
+                                        ground_truth,
+                                        audio_durations,
+                                        dtc_threshold=0.1,
+                                        gtc_threshold=0.1,
+                                        cttc_threshold=0.3,
+                                        alpha_ct=0.5,
+                                        alpha_st=1,
+                                        save_dir=os.path.join(save_dir, "teacher", "scenario2", "sed_eval"),
+                                    )
+            
+            event_macro_teacher = log_sedeval_metrics(
+                              self.decoded_05_buffer_teacher,
+                              os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                              save_dir)[0]
+            intersection_f1_macro_teacher = compute_per_intersection_macro_f1(
+                                        {"0.5": self.decoded_05_buffer_teacher},
+                                        os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_tsv"]),
+                                        os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["test_dur"]),)
+            
+            self.log("test/psds1_teacher", psds1_psds_eval_teacher, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("test/psds1_sed_scores_teacher", psds1_sed_scores_eval_teacher, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("test/psds2_teacher", psds2_psds_eval_teacher, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("test/psds2_sed_scores_teacher", psds2_sed_scores_eval_teacher, on_epoch=True, prog_bar=True, sync_dist=False)
+            #self.log("test/best_psds", best_test_result, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("test/event_macro_teacher", event_macro_teacher, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("test/intersection_f1_macro_teacher", intersection_f1_macro_teacher, on_epoch=True, prog_bar=True, sync_dist=False)
 
         event_macro = log_sedeval_metrics(
                               self.decoded_05_buffer,
@@ -789,21 +951,21 @@ class SEDWrapper(pl.LightningModule):
         best_test_result = torch.tensor(max(psds1_psds_eval, psds2_psds_eval))
         
 
-        self.log("psds1", psds1_psds_eval, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("psds1_sed_scores", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("psds2", psds2_psds_eval, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("psds2_sed_scores", psds2_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("best_psds", best_test_result, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("event_macro", event_macro, on_epoch=True, prog_bar=True, sync_dist=False)
-        self.log("intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/psds1", psds1_psds_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/psds1_sed_scores", psds1_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/psds2", psds2_psds_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/psds2_sed_scores", psds2_sed_scores_eval, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/best_psds", best_test_result, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/event_macro", event_macro, on_epoch=True, prog_bar=True, sync_dist=False)
+        self.log("test/intersection_f1_macro", intersection_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False)
         pred_classes = torch.cat([d[0] for d in test_step_outputs], dim=0)
         pred_frame = torch.cat([d[1] for d in test_step_outputs], dim=0)
         target = torch.cat([d[2] for d in test_step_outputs], dim=0)
         target_class = torch.any(target == 1, dim=1).int()
         multilabel_f1_test = self.multilabel_f1_test.compute()
-        multilabel_f1_test_classes = self.multilabel_f1_test_classes.compute()
+       # multilabel_f1_test_classes = self.multilabel_f1_test_classes.compute()
         mAP_test = self.mAP_test.compute()
-        mAP_test_classes = self.mAP_test_classes.compute()
+        #mAP_test_classes = self.mAP_test_classes.compute()
         #target_frame = torch.cat([d[3] for d in test_step_outputs], dim=0)
 
         # print("=====================================")
@@ -894,9 +1056,9 @@ class SEDWrapper(pl.LightningModule):
             #self.log("multilabel f1 classes", multilabel_f1_test_classes, on_epoch=True, prog_bar = True)
             self.log("mAP test", mAP_test, on_epoch=True, prog_bar = True)
             #self.log("mAP test classes", mAP_test_classes, on_epoch=True, prog_bar = True)
-            for i in range(10):
-                self.log("mAP test class: " + config.id2classes[i] , mAP_test_classes[i], on_epoch=True, prog_bar = True)
-                self.log("multilabel f1 class: " +config.id2classes[i] , multilabel_f1_test_classes[i], on_epoch=True, prog_bar = True)
+            #for i in range(10):
+                #self.log("mAP test class: " + config.id2classes[i] , mAP_test_classes[i], on_epoch=True, prog_bar = True)
+                #self.log("multilabel f1 class: " +config.id2classes[i] , multilabel_f1_test_classes[i], on_epoch=True, prog_bar = True)
             sedeval_metrics = log_sedeval_metrics(
             self.decoded_05_buffer, os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["val_tsv"],
         ))
@@ -935,9 +1097,9 @@ class SEDWrapper(pl.LightningModule):
             # self.log("mAUC", metric_dict["mAUC"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             # self.log("dprime", metric_dict["dprime"] * float(dist.get_world_size()), on_epoch = True, prog_bar=True, sync_dist=True)
             self.multilabel_f1_test.reset()
-            self.multilabel_f1_test_classes.reset()
+            #self.multilabel_f1_test_classes.reset()
             self.mAP_test.reset()
-            self.mAP_test_classes.reset()
+            #self.mAP_test_classes.reset()
         else:
             self.log(
                 "acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=False
@@ -945,13 +1107,7 @@ class SEDWrapper(pl.LightningModule):
         # dist.barrier()
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, self.parameters()),
-            lr=self.config.learning_rate,
-            betas=(0.9, 0.999),
-            eps=1e-08,
-            weight_decay=0.05,
-        )
+        return [self.opt], [self.scheduler]
 
         # Change: SWA, deprecated
         # optimizer = SWA(optimizer, swa_start=10, swa_freq=5)

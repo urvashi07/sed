@@ -45,7 +45,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProg
 import warnings
 from collections import OrderedDict
 import argparse
-
+sys.path.append(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+            )
+from desed_task.utils.schedulers import ExponentialWarmup
 sys.path.append(
             os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "desed_task/dataio/")
             )
@@ -149,12 +152,13 @@ if __name__ == "__main__":
     print(args.model)
 
     args.model = args.model.lower()
+    config.model = args.model
 
     log_dir = ""
     if args.model == "panns":
-        log_dir = os.path.join("./logs", "panns_all_data")
+        log_dir = os.path.join("/work", "unegi2s", "logs", "panns", "student_teacher")
     elif args.model == "hts-at" or args.model == "htsat":
-        log_dir = os.path.join("./logs", "hts-at_all_data")
+        log_dir = os.path.join("/work", "unegi2s", "logs", "htsat" , "student_teacher")
     else:
         print(args.model + " not defined currently. Only PANNs and HTS-AT defined.")
         sys.exit()
@@ -321,16 +325,19 @@ if __name__ == "__main__":
     print("..............................")
 
     checkpoint_callback = ModelCheckpoint(
-        monitor="mAP",
+        monitor="val/obj_metric",
         dirpath= os.path.join(log_dir, "checkpoints"),
         # filename='l-{epoch:d}-{mAP:.3f}',
-        save_top_k=2,
+        save_top_k=1,
         mode="max",
+        save_last=True,
     )
 
     early_stop = EarlyStopping(
-                    monitor="mAP", patience=configs["training"]["early_stop_patience"],
-                    verbose=True, mode="max")
+                    monitor="val/obj_metric", 
+                    patience=configs["training"]["early_stop_patience"],
+                    verbose=True, 
+                    mode="max")
 
     trainer = pl.Trainer(
         deterministic=False,
@@ -338,8 +345,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         #gpus=None,  # For running locally,
         gpus=[0],
+        check_val_every_n_epoch=configs["training"]["validation_interval"],
         max_epochs=configs["training"]["max_epoch"],
-        auto_lr_find=True,
         sync_batchnorm=True,
         num_sanity_val_steps=0,
         # resume_from_checkpoint = config.resume_checkpoint,
@@ -349,7 +356,8 @@ if __name__ == "__main__":
     )
 
     pretrain_path = ""
-
+    sed_teacher = None
+    
     if args.model == "hts-at" or args.model == "htsat":
         sed_model = HTSAT_Swin_Transformer(
             spec_size=configs["hts-at"]["htsat_spec_size"],
@@ -366,6 +374,19 @@ if __name__ == "__main__":
 
         pretrain_path = os.path.join(
             configs["data"]["prefix_folder"], configs["swin_pretrain_path"]
+        )
+        
+        sed_teacher = HTSAT_Swin_Transformer(
+            spec_size=configs["hts-at"]["htsat_spec_size"],
+            patch_size=configs["hts-at"]["htsat_patch_size"],
+            in_chans=1,
+            num_classes=configs["classes_num"],
+            window_size=configs["hts-at"]["htsat_window_size"],
+            config=config,
+            depths=configs["hts-at"]["htsat_depth"],
+            embed_dim=configs["hts-at"]["htsat_dim"],
+            patch_stride=tuple(configs["hts-at"]["htsat_stride"]),
+            num_heads=configs["hts-at"]["htsat_num_head"],
         )
 
     elif args.model == "panns":
@@ -388,13 +409,33 @@ if __name__ == "__main__":
         pretrain_path = os.path.join(
             configs["data"]["prefix_folder"], configs["panns_pretrain_path"]
         )
+        
+    
 
-    # model = SEDWrapper(sed_model=sed_model, config=config, df_eval = pd.concat([df_train_strong, df_train_synth]).iloc[list_val_indices],
-    #                   df_test = pd.concat([df_eval_strong, df_eval_strong]), prefix_folder = configs["data"]["prefix_folder"])
+    epoch_len = min(
+            [
+                len(tot_train_data[indx])
+                // (
+                    configs["training"]["batch_sizes"][indx]
+                    * configs["training"]["accumulate_batches"]
+                )
+                for indx in range(len(tot_train_data))
+            ]
+        )
+    
+    opt = torch.optim.Adam(sed_model.parameters(), configs["opt"]["lr"], betas=(0.9, 0.999))
+    exp_steps = configs["training"]["n_epochs_warmup"] * epoch_len
+    exp_scheduler = {
+            "scheduler": ExponentialWarmup(opt, configs["opt"]["lr"], exp_steps),
+            "interval": "step",
+        }
     model = SEDWrapper(
         sed_model=sed_model,
+        sed_teacher = sed_teacher,
         config=config,
         prefix_folder=configs["data"]["prefix_folder"],
+        opt = opt, 
+        scheduler = exp_scheduler
     )
 
     model.learning_rate = LEARNING_RATE
@@ -419,55 +460,12 @@ if __name__ == "__main__":
         elif args.model == "panns":
             ckpt = torch.load(pretrain_path)
             model.load_state_dict(ckpt["model"], strict=False)
+            
+
 
     trainer.fit(model, sed_data.train_dataloader(), sed_data.val_dataloader())
 
     # best_model = SEDWrapper.load_from_checkpoint(checkpoint_callback.best_model_path)
-
-    """prediction_df = best_model.prediction(test_df=df_eval_strong,
-                           test_audio=os.path.join(configs["data"]["prefix_folder"], configs["data"]["val_folder"]),
-                           threshold=0.5, 
-                           SR= SAMPLE_RATE)"""
-
-    """trainer = pl.Trainer(
-        deterministic=False,
-        gpus = 0, 
-        max_epochs = config.max_epoch,   
-        sync_batchnorm = True,
-        num_sanity_val_steps = 0,
-        # resume_from_checkpoint = config.resume_checkpoint,
-        gradient_clip_val=1.0,
-        logger=tb_logger,
-
-    )
-    sed_model = HTSAT_Swin_Transformer(
-        spec_size=config.htsat_spec_size,
-        patch_size=config.htsat_patch_size,
-        in_chans=1,
-        num_classes=config.classes_num,
-        window_size=config.htsat_window_size,
-        config = config,
-        depths = config.htsat_depth,
-        embed_dim = config.htsat_dim,
-        patch_stride=config.htsat_stride,
-        num_heads=config.htsat_num_head
-    )
-    
-    model = SEDWrapper(
-        sed_model = sed_model, 
-        config = config,
-        dataset = eval_dataset
-    )
-    if config.resume_checkpoint is not None:
-        ckpt = torch.load(config.resume_checkpoint, map_location="cpu")
-        ckpt["state_dict"].pop("sed_model.head.weight")
-        ckpt["state_dict"].pop("sed_model.head.bias")
-        model.load_state_dict(ckpt["state_dict"], strict=False)
-    #else:
-        #best_path = trainer.checkpoint_callback.best_model_path
-        #print(f"best model: {best_path}")
-        #test_state_dict = torch.load(best_path)["state_dict"]
-        #model.load_state_dict(test_state_dict)"""
 
     trainer.test(model, sed_data.test_dataloader(), ckpt_path="best")
     h5py_file.close()

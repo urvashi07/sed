@@ -113,3 +113,4 @@ swin_pretrain_path: "ckpt_hts-at/HTSAT_AudioSet_Saved_4.ckpt"
 panns_pretrain_path: "ckpt_panns/Cnn14_DecisionLevelAtt_mAP0.425.pth"
   #panns_pretrain_path: None
 hdf_file: "/work/unegi2s/dcase_sed_data.hdf5"
+student_teacher_model: True
