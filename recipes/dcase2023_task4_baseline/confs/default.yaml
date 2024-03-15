@@ -25,7 +25,7 @@ training:
   precision: 32
   enable_progress_bar: True
   reduce_dataset_size: False
-  max_epoch: 100
+  max_epoch: 50
   batch_size: 64
   random_seed: 2023
   ckpt_epoch: 25
@@ -114,3 +114,4 @@ panns_pretrain_path: "ckpt_panns/Cnn14_DecisionLevelAtt_mAP0.425.pth"
   #panns_pretrain_path: None
 hdf_file: "/work/unegi2s/dcase_sed_data.hdf5"
 student_teacher_model: True
+augment_data: True

@@ -11,3 +11,4 @@ pip install museval
 pip install torchlibrosa
 pip install -e ../../.
 pip install torchcontrib==0.0.2
+pip install audiomentations

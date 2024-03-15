@@ -361,12 +361,13 @@ class SEDWrapper(pl.LightningModule):
     # self.dataset.generate_queue()
     def on_before_zero_grad(self, *args, **kwargs):
         # update EMA teacher
-        self.update_ema(
-            self.configs["training"]["ema_factor"],
-            self.scheduler["scheduler"].step_num,
-            self.sed_model,
-            self.sed_teacher,
-        )
+        if self.student_teacher_model:
+            self.update_ema(
+                self.configs["training"]["ema_factor"],
+                self.scheduler["scheduler"].step_num,
+                self.sed_model,
+                self.sed_teacher,
+            )
 
     def validation_step(self, batch, batch_idx):
         audio_name, audio, labels = batch["audio_name"], batch["waveform"], batch["target"]
@@ -505,7 +506,7 @@ class SEDWrapper(pl.LightningModule):
         self.log(
                 "val/weak_f1", weak_f1_macro, on_epoch=True, prog_bar=True, sync_dist=False
             )
-        save_dir = os.path.join("/work/unegi2s/predictions/student_teacher/val/", config.model)
+        save_dir = os.path.join(config.pred_save_dir,"val", config.model)
         #print(self.val_decoded_pred)
         if self.student_teacher_model:
             weak_f1_macro_teacher = self.get_weak_f1_seg_macro_teacher.compute()
@@ -695,7 +696,8 @@ class SEDWrapper(pl.LightningModule):
         
     def on_save_checkpoint(self, checkpoint):
         checkpoint["sed_model"] = self.sed_model.state_dict()
-        checkpoint["sed_teacher"] = self.sed_teacher.state_dict()
+        if self.student_teacher_model:
+            checkpoint["sed_teacher"] = self.sed_teacher.state_dict()
         return checkpoint
 
     def time_shifting(self, x, shift_len):
@@ -714,7 +716,7 @@ class SEDWrapper(pl.LightningModule):
         if self.student_teacher_model:
             output_dict = self.sed_teacher(audio)
             pred_clip_teacher, pred_frame_teacher = output_dict["clipwise_output"], output_dict["framewise_output"]
-            pred_clip_tecaher = pred_clip_teacher.to(self.device)
+            pred_clip_teacher = pred_clip_teacher.to(self.device)
         #print(pred_clip)
         labels_frame2class = torch.any(labels == 1, dim=1).int().squeeze().to(self.device)
         if len(labels_frame2class.shape) < 2:
@@ -798,7 +800,7 @@ class SEDWrapper(pl.LightningModule):
 
     def test_epoch_end(self, test_step_outputs):
         # print(test_step_outputs.shape)
-        save_dir = os.path.join("/work/unegi2s/predictions/student_teacher", config.model)
+        save_dir = os.path.join(config.pred_save_dir, config.model)
         save_dir_raw = os.path.join(save_dir, "scores_raw")
         sed_scores_eval.io.write_sed_scores(self.test_scores_raw_buffer, save_dir_raw)
         print(f"\nRaw scores saved in: {save_dir_raw}")

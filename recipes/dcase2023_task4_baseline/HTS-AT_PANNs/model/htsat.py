@@ -1012,8 +1012,8 @@ class HTSAT_Swin_Transformer(nn.Module):
         x = x.transpose(1, 3)
         x = self.bn0(x)
         x = x.transpose(1, 3)
-        # if self.training:
-        # x = self.spec_augmenter(x)
+        if self.training:
+            x = self.spec_augmenter(x)
         ##if self.training and mixup_lambda is not None:
         ##    x = do_mixup(x, mixup_lambda)
         ##print(x.shape)

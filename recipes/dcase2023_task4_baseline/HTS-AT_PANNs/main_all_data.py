@@ -66,7 +66,7 @@ from prepare_data import prepare_all_data
 
 from create_hdf_file import create_hdf_file
 import h5py
-
+from augment import augment_audio_files
 
 print(torch.cuda.is_available())
 
@@ -154,20 +154,18 @@ if __name__ == "__main__":
     args.model = args.model.lower()
     config.model = args.model
 
-    log_dir = ""
+
+    """log_dir = ""
     if args.model == "panns":
-        log_dir = os.path.join("/work", "unegi2s", "logs", "panns", "student_teacher")
+        log_dir = os.path.join("/work", "unegi2s")
     elif args.model == "hts-at" or args.model == "htsat":
-        log_dir = os.path.join("/work", "unegi2s", "logs", "htsat" , "student_teacher")
+        log_dir = os.path.join("/work", "unegi2s")
     else:
         print(args.model + " not defined currently. Only PANNs and HTS-AT defined.")
-        sys.exit()
+        sys.exit()"""
 
-    if not os.path.exists("./logs"):
-        os.mkdir("./logs")
-
-    if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
+    """if not os.path.exists("./logs"):
+        os.mkdir("./logs")"""
 
     conf_file_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -176,6 +174,43 @@ if __name__ == "__main__":
 
     with open(conf_file_path, "r") as f:
         configs = yaml.safe_load(f)
+    
+    base_log_dir = os.path.join("/work", "unegi2s", "epochs_" + str(configs["training"]["max_epoch"]))
+    pred_save_dir = base_log_dir
+
+    if not os.path.exists(base_log_dir):
+        os.mkdir(base_log_dir)
+
+    if configs["student_teacher_model"]:
+        base_log_dir = os.path.join(base_log_dir, "student_teacher")
+        pred_save_dir = base_log_dir
+        if not os.path.exists(base_log_dir):
+            os.mkdir(base_log_dir)
+        if not os.path.exists(pred_save_dir):
+            os.mkdir(pred_save_dir)
+    
+    if configs["augment_data"]:
+        base_log_dir = os.path.join(base_log_dir, "augmented")
+        if not os.path.exists(base_log_dir):
+            os.mkdir(base_log_dir)
+        pred_save_dir = base_log_dir
+        if not os.path.exists(pred_save_dir):
+            os.mkdir(pred_save_dir)
+
+    log_dir = os.path.join(base_log_dir, "logs")
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+
+    log_dir = os.path.join(log_dir, config.model)
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+
+    pred_save_dir = os.path.join(pred_save_dir, "predictions")
+    if not os.path.exists(pred_save_dir):
+        os.mkdir(pred_save_dir)
+
+    config.pred_save_dir = pred_save_dir
+
 
     logging.basicConfig(level=logging.INFO)
     pl.utilities.seed.seed_everything(seed=configs["training"]["random_seed"])
@@ -249,7 +284,17 @@ if __name__ == "__main__":
         [train_dataset_strong, train_dataset_synth]
     )
     print(len(train_dataset_strong_synth))
-    tot_train_data = [train_dataset_strong_synth, train_dataset_weak]
+    if configs["augment_data"]:
+        augmented_dataset_strong = augment_audio_files(train_dataset_strong_synth)
+        train_strong_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_strong_synth, augmented_dataset_strong])
+        augmented_dataset_weak = augment_audio_files(train_dataset_weak)
+        train_weak_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_weak, augmented_dataset_weak])
+
+    if configs["augment_data"]:
+        tot_train_data = [train_strong_dataset_with_augment, train_weak_dataset_with_augment]
+    else:
+        tot_train_data = [train_dataset_strong_synth, train_dataset_weak]
+    
     print(len(train_dataset_weak))
     train_dataset = torch.utils.data.ConcatDataset(tot_train_data)
     batch_sizes = configs["training"]["batch_sizes"]
