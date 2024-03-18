@@ -284,9 +284,9 @@ class SEDWrapper(pl.LightningModule):
         strong_mask[:indx_synth] = 1
         weak_mask[indx_synth : indx_weak + indx_synth] = 1
         ##if self.config.dataset_type == "audioset":
-        ##mix_lambda = torch.from_numpy(get_mix_lambda(0.5, len(batch["waveform"]))).to(self.device_type)
+        mix_lambda = torch.from_numpy(get_mix_lambda(0.5, len(batch["waveform"]))).to(self.device_type)
         # else:
-        mix_lambda = None
+        #mix_lambda = None
 
         # Another Choice: also mixup the target, but AudioSet is not a perfect data
         # so "adding noise" might be better than purly "mix"

@@ -120,10 +120,10 @@ class data_prep(pl.LightningDataModule):
             num_workers=configs["training"]["num_workers"],
             shuffle=False,
             sampler=None,
-            batch_size=4,
+            batch_size=configs["training"]["batch_size_val"],
             #sampler=self.val_batch_sampler,
             #collate_fn=custom_collate,
-        )
+            )
         return eval_loader
 
     def test_dataloader(self):
@@ -154,19 +154,6 @@ if __name__ == "__main__":
     args.model = args.model.lower()
     config.model = args.model
 
-
-    """log_dir = ""
-    if args.model == "panns":
-        log_dir = os.path.join("/work", "unegi2s")
-    elif args.model == "hts-at" or args.model == "htsat":
-        log_dir = os.path.join("/work", "unegi2s")
-    else:
-        print(args.model + " not defined currently. Only PANNs and HTS-AT defined.")
-        sys.exit()"""
-
-    """if not os.path.exists("./logs"):
-        os.mkdir("./logs")"""
-
     conf_file_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "confs/default.yaml",
@@ -190,7 +177,15 @@ if __name__ == "__main__":
             os.mkdir(pred_save_dir)
     
     if configs["augment_data"]:
-        base_log_dir = os.path.join(base_log_dir, "augmented")
+        base_log_dir = os.path.join(base_log_dir, "mixup_specaugment")
+        if not os.path.exists(base_log_dir):
+            os.mkdir(base_log_dir)
+        pred_save_dir = base_log_dir
+        if not os.path.exists(pred_save_dir):
+            os.mkdir(pred_save_dir)
+            
+    if configs["unlabelled"]:
+        base_log_dir = os.path.join(base_log_dir, "unlabelled")
         if not os.path.exists(base_log_dir):
             os.mkdir(base_log_dir)
         pred_save_dir = base_log_dir
@@ -279,6 +274,18 @@ if __name__ == "__main__":
         config=configs,
         device=device,
     )
+    
+    if configs["unlabelled"]:
+        h5py_unlabelled_file_path = os.path.join(configs["data"]["prefix_folder"], config.model, configs["unlabelled_hdf_file"])
+        h5py_unlabelled_file = h5py.File(h5py_unlabelled_file_path, "r")
+        unlabelled_weak = SEDDataset(
+        transformation=None,
+        target_sample_rate=SAMPLE_RATE,
+        num_samples=NUM_SAMPLES,
+        data=h5py_unlabelled_file,
+        config=configs,
+        device=device,
+        )
 
     train_dataset_strong_synth = torch.utils.data.ConcatDataset(
         [train_dataset_strong, train_dataset_synth]
@@ -289,13 +296,25 @@ if __name__ == "__main__":
         train_strong_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_strong_synth, augmented_dataset_strong])
         augmented_dataset_weak = augment_audio_files(train_dataset_weak)
         train_weak_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_weak, augmented_dataset_weak])
+    print(len(train_strong_dataset_with_augment))
+    
+    if configs["augment_data"] and configs["unlabelled"]:
+        weak_dataset = torch.utils.data.ConcatDataset([train_weak_dataset_with_augment, unlabelled_weak])
+    if configs["augment_data"] and not configs["unlabelled"]:
+        weak_dataset = train_weak_dataset_with_augment
+    if not configs["augment_data"] and configs["unlabelled"]:
+        weak_dataset = torch.utils.data.ConcatDataset([train_dataset_weak, unlabelled_weak])
+    else:
+        weak_dataset = train_dataset_weak
 
     if configs["augment_data"]:
-        tot_train_data = [train_strong_dataset_with_augment, train_weak_dataset_with_augment]
+        tot_train_data = [train_strong_dataset_with_augment, weak_dataset]
+        print(len(train_strong_dataset_with_augment))
     else:
-        tot_train_data = [train_dataset_strong_synth, train_dataset_weak]
+        tot_train_data = [train_dataset_strong_synth, weak_dataset]
+        print(len(train_dataset_strong_synth))
+    print(len(weak_dataset))
     
-    print(len(train_dataset_weak))
     train_dataset = torch.utils.data.ConcatDataset(tot_train_data)
     batch_sizes = configs["training"]["batch_sizes"]
     samplers = [torch.utils.data.RandomSampler(x) for x in tot_train_data]
@@ -513,6 +532,7 @@ if __name__ == "__main__":
     # best_model = SEDWrapper.load_from_checkpoint(checkpoint_callback.best_model_path)
 
     trainer.test(model, sed_data.test_dataloader(), ckpt_path="best")
+    h5py_unlabelled_file.close()
     h5py_file.close()
     end_time = time.time()
     print(f"End time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
