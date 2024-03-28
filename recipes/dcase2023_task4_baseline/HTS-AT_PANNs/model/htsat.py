@@ -1006,14 +1006,27 @@ class HTSAT_Swin_Transformer(nn.Module):
     def forward(
         self, x: torch.Tensor, mixup_lambda=None, infer_mode=False, register_hook = False
     ):  # out_feat_keys: List[str] = None):
-        x = self.spectrogram_extractor(x)  # (batch_size, 1, time_steps, freq_bins)
-        x = self.logmel_extractor(x)  # (batch_size, 1, time_steps, mel_bins)
+        device = x.device
+        print(device)
+        embeddings = True
+        if not embeddings:
+            x = self.spectrogram_extractor(x)  # (batch_size, 1, time_steps, freq_bins)
+            x = self.logmel_extractor(x)  # (batch_size, 1, time_steps, mel_bins)
 
-        x = x.transpose(1, 3)
-        x = self.bn0(x)
-        x = x.transpose(1, 3)
-        if self.training:
-            x = self.spec_augmenter(x)
+            x = x.transpose(1, 3)
+            x = self.bn0(x)
+            x = x.transpose(1, 3)
+
+            if self.training:
+                x = self.spec_augmenter(x)
+        if embeddings:
+            x = x.unsqueeze(1)
+            device = x.device
+            print(device)
+            conv = nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(1, 4), stride=(1, 8), padding=(0, 0))
+            conv = conv.to(device) 
+            x = conv(x)
+            x = x.to(device)
         ##if self.training and mixup_lambda is not None:
         ##    x = do_mixup(x, mixup_lambda)
         ##print(x.shape)

@@ -801,6 +801,7 @@ class SEDWrapper(pl.LightningModule):
     def test_epoch_end(self, test_step_outputs):
         # print(test_step_outputs.shape)
         save_dir = os.path.join(config.pred_save_dir, config.model)
+        print("test result directory: " + save_dir)
         save_dir_raw = os.path.join(save_dir, "scores_raw")
         sed_scores_eval.io.write_sed_scores(self.test_scores_raw_buffer, save_dir_raw)
         print(f"\nRaw scores saved in: {save_dir_raw}")
@@ -1107,6 +1108,16 @@ class SEDWrapper(pl.LightningModule):
                 "acc", metric_dict["acc"], on_epoch=True, prog_bar=True, sync_dist=False
             )
         # dist.barrier()
+
+    def predict_step(self, batch, batch_idx):
+        audio_name, audio = batch["audio_name"], batch["waveform"]
+        #print(audio_name)
+        #print(audio.shape)
+        #print(type(audio))
+        clip_pred, _ = self(audio)
+        return {"audio_name": audio_name, 
+                "waveform": audio,
+                "target": clip_pred}
 
     def configure_optimizers(self):
         return [self.opt], [self.scheduler]

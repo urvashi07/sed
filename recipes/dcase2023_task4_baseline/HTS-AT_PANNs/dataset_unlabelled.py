@@ -42,9 +42,10 @@ class UnlabelledDataset(Dataset):
         waveform = self._right_pad_if_necessary(waveform)
 
         waveform = waveform.view(-1)
-        return {"waveform": waveform,
-                "audio_name": filepath}
-        
+        data_dict = {"audio_name": filepath,
+                      "waveform": torch.tensor(waveform)}
+        return data_dict
+
     def __len__(self):
         return len(self.files)
     

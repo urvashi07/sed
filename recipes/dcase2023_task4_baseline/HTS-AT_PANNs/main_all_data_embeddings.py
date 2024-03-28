@@ -18,6 +18,7 @@ import pickle
 import random
 from datetime import datetime
 
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -34,7 +35,7 @@ from utils import (
 )
 
 import config
-from sed_model import SEDWrapper, Ensemble_SEDWrapper
+from sed_model import SEDWrapper
 from models import Cnn14_DecisionLevelMax
 
 # from data_generator import SEDDataset, DESED_Dataset, ESC_Dataset, SCV2_Dataset
@@ -57,7 +58,10 @@ from sampler import ConcatDatasetBatchSampler
 warnings.filterwarnings("ignore")
 
 from datasets import SEDDataset
+from dataset_unlabelled import UnlabelledDataset
 from datasets_strong import SEDDataset_Strong
+from datasets_strong_embeddings import SEDDataset_Strong_Embeddings
+from datasets_embeddings import SEDDataset_Embeddings
 
 # from typing import List
 from pathlib import Path
@@ -68,7 +72,6 @@ from create_hdf_file import create_hdf_file
 import h5py
 from augment import augment_audio_files
 
-from dataset_unlabelled import UnlabelledDataset
 print(torch.cuda.is_available())
 
 def is_hdf5_empty(file_path):
@@ -91,19 +94,37 @@ def custom_collate(batch):
 
 
 # Create a custom DataLoader that uses the ConcatDatasetBatchSampler
+import torch
+from torch.utils.data import Dataset, ConcatDataset, DataLoader
 
+class Unlabelled2Weak(Dataset):
+    def __init__(self, results):
+        self.results = results
+
+    def __len__(self):
+        return len(self.results)
+
+    def __getitem__(self, index):
+        result = self.results[index]
+        audio_name = result["audio_name"]
+        waveform = result["waveform"]
+        target = result["target"]
+        return audio_name, waveform, target
+    
 class predict_data(pl.LightningDataModule):
-    def __init__(self, dataset):
+    def __init__(self, dataset):#,
+                 #val_batch_sampler):
         super().__init__()
         self.dataset = dataset
 
     def predict_dataloader(self):
-        predict_loader = DataLoader(dataset=self.dataset,
-                                    num_workers=configs["training"]["num_workers"],
-                                    shuffle=False,
-                                    sampler=None,
-                                    batch_size=4)
+        predict_loader = DataLoader(
+            dataset=self.dataset,
+            num_workers=configs["training"]["num_workers"],
+            shuffle=False,
+        )
         return predict_loader
+
 
 class data_prep(pl.LightningDataModule):
     def __init__(self, train_dataset, eval_dataset, test_dataset, 
@@ -150,19 +171,6 @@ class data_prep(pl.LightningDataModule):
         )
         return test_loader
 
-class Unlabelled2WeakDataset(Dataset):
-    def __init__(self, audio_names, waveforms, targets):
-        self.audio_names = audio_names
-        self.waveforms = waveforms
-        self.targets = targets
-
-    def __len__(self):
-        return len(self.audio_names)
-
-    def __getitem__(self, idx):
-        return {'audio_name': self.audio_names[idx],
-                 'waveform': self.waveforms[idx],
-                 'target': torch.Tensor(self.targets[idx])}
 
 if __name__ == "__main__":
     start_time = time.time()
@@ -188,7 +196,7 @@ if __name__ == "__main__":
     with open(conf_file_path, "r") as f:
         configs = yaml.safe_load(f)
     
-    base_log_dir = os.path.join("/work", "unegi2s", "pseudo_labelling" ,"epochs_" + str(configs["training"]["max_epoch"]))
+    base_log_dir = os.path.join("/work", "unegi2s", "embeddings_results" ,"epochs_" + str(configs["training"]["max_epoch"]))
     pred_save_dir = base_log_dir
 
     if not os.path.exists(base_log_dir):
@@ -202,21 +210,14 @@ if __name__ == "__main__":
         if not os.path.exists(pred_save_dir):
             os.mkdir(pred_save_dir)
     
-    if configs["augment_data"]:
-        base_log_dir = os.path.join(base_log_dir, "augmented")
-        if not os.path.exists(base_log_dir):
-            os.mkdir(base_log_dir)
-        pred_save_dir = base_log_dir
-        if not os.path.exists(pred_save_dir):
-            os.mkdir(pred_save_dir)
             
-    if configs["unlabelled"]:
+    """if configs["unlabelled"]:
         base_log_dir = os.path.join(base_log_dir, "unlabelled")
         if not os.path.exists(base_log_dir):
             os.mkdir(base_log_dir)
         pred_save_dir = base_log_dir
         if not os.path.exists(pred_save_dir):
-            os.mkdir(pred_save_dir)
+            os.mkdir(pred_save_dir)"""
 
 
     log_dir = os.path.join(base_log_dir, "logs")
@@ -227,11 +228,10 @@ if __name__ == "__main__":
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
 
-    pred_save_dir = os.path.join(pred_save_dir, "predictions")
+    pred_save_dir = os.path.join(pred_save_dir, "predictions", config.model )
     if not os.path.exists(pred_save_dir):
         os.mkdir(pred_save_dir)
 
-    config.log_dir = log_dir
     config.pred_save_dir = pred_save_dir
     print("Log directory: " +log_dir)
     print("pred directory: " +pred_save_dir)
@@ -278,34 +278,37 @@ if __name__ == "__main__":
     eval_data = h5py_file["eval"]
     test_data = h5py_file["test"]
 
-    train_dataset_strong = SEDDataset_Strong(
-        transformation=None,
+    train_dataset_strong = SEDDataset_Strong_Embeddings(
+        transformation = None,
         target_sample_rate=SAMPLE_RATE,
-        num_samples=NUM_SAMPLES,
+        num_samples=SAMPLE_RATE,
         data=train_data["strong"],
         config=configs,
         device=device,
+        filename='strong_train.hdf5'
     )
 
-    train_dataset_synth = SEDDataset_Strong(
-        transformation=None,
+    train_dataset_synth = SEDDataset_Strong_Embeddings(
+        transformation = None,
         target_sample_rate=SAMPLE_RATE,
-        num_samples=NUM_SAMPLES,
+        num_samples=SAMPLE_RATE,
         data=train_data["synth"],
         config=configs,
         device=device,
+        filename='synth_train.hdf5'
     )
 
-    train_dataset_weak = SEDDataset(
-        transformation=None,
+    train_dataset_weak = SEDDataset_Embeddings(
+        transformation = None,
         target_sample_rate=SAMPLE_RATE,
-        num_samples=NUM_SAMPLES,
+        num_samples=SAMPLE_RATE,
         data=train_data["weak"],
         config=configs,
         device=device,
+        filename='weak_train.hdf5'
     )
     
-    if configs["unlabelled"]:
+    """if configs["unlabelled"]:
         h5py_unlabelled_file_path = os.path.join(configs["data"]["prefix_folder"], config.model, configs["unlabelled_hdf_file"])
         h5py_unlabelled_file = h5py.File(h5py_unlabelled_file_path, "r")
         unlabelled_weak = SEDDataset(
@@ -315,35 +318,26 @@ if __name__ == "__main__":
         data=h5py_unlabelled_file,
         config=configs,
         device=device,
-        )
+        )"""
 
     train_dataset_strong_synth = torch.utils.data.ConcatDataset(
         [train_dataset_strong, train_dataset_synth]
     )
-    #print(len(train_dataset_strong_synth))
+    print(len(train_dataset_strong_synth))
     """if configs["augment_data"]:
         augmented_dataset_strong = augment_audio_files(train_dataset_strong_synth)
         train_strong_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_strong_synth, augmented_dataset_strong])
         augmented_dataset_weak = augment_audio_files(train_dataset_weak)
         train_weak_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_weak, augmented_dataset_weak])
-        print(len(train_strong_dataset_with_augment))
+        print(len(train_strong_dataset_with_augment))"""
     
-    if configs["augment_data"] and configs["unlabelled"]:
-        weak_dataset = torch.utils.data.ConcatDataset([train_weak_dataset_with_augment, unlabelled_weak])
-    if configs["augment_data"] and not configs["unlabelled"]:
-        weak_dataset = train_weak_dataset_with_augment
-    if not configs["augment_data"] and configs["unlabelled"]:
-        weak_dataset = torch.utils.data.ConcatDataset([train_dataset_weak, unlabelled_weak])
-    else:
-        weak_dataset = train_dataset_weak
+    weak_dataset = train_dataset_weak
 
-    if configs["augment_data"]:
+    """if configs["augment_data"]:
         tot_train_data = [train_strong_dataset_with_augment, weak_dataset]
         print(len(train_strong_dataset_with_augment))
     else:"""
-    weak_dataset = train_dataset_weak
     tot_train_data = [train_dataset_strong_synth, weak_dataset]
-    print("total strong and weak data")
     print(len(train_dataset_strong_synth))
     print(len(weak_dataset))
     
@@ -360,31 +354,35 @@ if __name__ == "__main__":
     # train_dataset = Subset(train_dataset, list_train_indices)
     # val_dataset = Subset(train_dataset, list_val_indices)
 
-    eval_dataset_synth = SEDDataset_Strong(
-        transformation=None,
+    eval_dataset_synth = SEDDataset_Strong_Embeddings(
+        transformation = None,
         target_sample_rate=SAMPLE_RATE,
-        num_samples=NUM_SAMPLES,
+        num_samples=SAMPLE_RATE,
         data=eval_data["synth"],
         config=configs,
         device=device,
+        filename='synth_val.hdf5'
     )
 
-    eval_dataset_weak = SEDDataset(
-        transformation=None,
+    eval_dataset_weak = SEDDataset_Embeddings(
+        transformation = None,
         target_sample_rate=SAMPLE_RATE,
-        num_samples=NUM_SAMPLES,
+        num_samples=SAMPLE_RATE,
         data=eval_data["weak"],
         config=configs,
         device=device,
+        filename='weak_val.hdf5'
     )
 
-    test_dataset = SEDDataset_Strong(
-        transformation=None,
+
+    test_dataset = SEDDataset_Strong_Embeddings(
+        transformation = None,
         target_sample_rate=SAMPLE_RATE,
-        num_samples=NUM_SAMPLES,
+        num_samples=SAMPLE_RATE,
         data=test_data["strong"],
         config=configs,
         device=device,
+        filename='devtest.hdf5'
     )
 
     # eval_dataset = ConcatDataset([eval_dataset_strong, eval_dataset_synth])
@@ -508,6 +506,13 @@ if __name__ == "__main__":
         pretrain_path = os.path.join(
             configs["data"]["prefix_folder"], configs["panns_pretrain_path"]
         )
+    
+    elif args.model == "beats":
+        from beats_transfer import BEATsTransferLearningModel
+        sed_model = BEATsTransferLearningModel(model_path=configs["beats_model_path"],
+                            num_target_classes=10,
+                            lr=LEARNING_RATE,
+                            ft_entire_network=True)
         
     
 
@@ -534,7 +539,7 @@ if __name__ == "__main__":
         config=config,
         prefix_folder=configs["data"]["prefix_folder"],
         opt = opt, 
-        scheduler = exp_scheduler
+        scheduler = exp_scheduler,
     )
 
     model.learning_rate = LEARNING_RATE
@@ -564,101 +569,17 @@ if __name__ == "__main__":
 
     trainer.fit(model, sed_data.train_dataloader(), sed_data.val_dataloader())
 
-    # best_model = SEDWrapper.load_from_checkpoint(checkpoint_callback.best_model_path)
-    unlabelled_dataset = UnlabelledDataset(dirpath = os.path.join(configs["data"]["prefix_folder"], configs["data"]["unlabeled_folder"]),
-                                            num_samples=NUM_SAMPLES, config=configs) 
-    #unlabelled_dataset = Subset(unlabelled_dataset, np.arange(8))    
+    """unlabelled_dataset = UnlabelledDataset(dirpath = os.path.join(configs["data"]["prefix_folder"], configs["data"]["unlabeled_folder"]),
+                                                                  num_samples=NUM_SAMPLES,
+        config=configs) 
+    
     predict_data_load = predict_data(unlabelled_dataset)
-    #threshold = 0.5
-    predictions = trainer.predict(model, predict_data_load.predict_dataloader(), ckpt_path="best")
-    combined_audio_names = []
-    combined_waveforms = []
-    combined_targets = []
-    batch_labels = []
-    threshold=0.5
-    for prediction in predictions:
-        combined_audio_names.extend(prediction['audio_name'])
-        combined_waveforms.append(prediction['waveform'])
-        for label_list in prediction['target']:
-            labels = [1 if x >= threshold else 0 for x in label_list]
-            #labels2int = [i for i, val in enumerate(labels) if val == 1]
-            batch_labels.append(labels)
-        combined_targets.append(batch_labels)
-    
-    combined_waveforms = torch.cat(combined_waveforms, dim=0)
-    
-    new_target = [inner for outer in combined_targets for inner in outer]
-    #combined_targets = torch.cat(combined_targets, dim=0)
-    unlabelled2weak_dataset = Unlabelled2WeakDataset(combined_audio_names, combined_waveforms, new_target)
-    combined_weak_dataset = [weak_dataset, unlabelled2weak_dataset]
-    weak_dataset = torch.utils.data.ConcatDataset(combined_weak_dataset)
-    print("------------------------------")
-    print("weak dataset with unlabelled: " + str(len(weak_dataset)))
-    if configs["augment_data"]:
-        print("strong data len")
-        augmented_dataset_strong = augment_audio_files(train_dataset_strong_synth)
-        train_strong_dataset_with_augment = torch.utils.data.ConcatDataset([train_dataset_strong_synth, augmented_dataset_strong])
-        print("strong augmented data: " +str(len(train_strong_dataset_with_augment)))
-        augmented_dataset_weak = augment_audio_files(train_dataset_weak)
-        train_weak_dataset_with_augment = torch.utils.data.ConcatDataset([weak_dataset, augmented_dataset_weak])
-        print("weak data with augmented: " +str(len(train_weak_dataset_with_augment)))
-        tot_train_data = [train_strong_dataset_with_augment, train_weak_dataset_with_augment]
-        print(len(train_strong_dataset_with_augment))
-    else:
-        tot_train_data = [train_dataset_strong_synth, weak_dataset]
-        print(len(train_dataset_strong_synth))
-        #print(len(weak_dataset))
-    #print("strong data len")
-    #print(len(tot_train_data))
-    print("weak data len:")
-    print(len(weak_dataset))
-    
-    train_dataset = torch.utils.data.ConcatDataset(tot_train_data)
-    print("total train data: " + str(len(train_dataset)))
-    batch_sizes = configs["training"]["batch_sizes"]
-    samplers = [torch.utils.data.RandomSampler(x) for x in tot_train_data]
-    batch_sampler = ConcatDatasetBatchSampler(samplers, batch_sizes)
+    results = []
+    threshold = 0.5
+    predictions = trainer.predict(model, predict_data_load.predict_dataloader())
+    print(predictions)"""
 
-    sed_data_with_unlabelled = data_prep(train_dataset, val_data,
-                                     test_dataset, batch_sampler)
-    config.pred_save_dir = os.path.join(config.pred_save_dir, str(configs["training"]["max_epoch_2"]))
-    checkpoint_callback_2 = ModelCheckpoint(
-                    monitor="val/obj_metric",
-                    dirpath= os.path.join(log_dir,"checkpoints"),
-                                    # filename='l-{epoch:d}-{mAP:.3f}',
-                    save_top_k=1,
-                    mode="max",
-                    save_last=True,
-                    )
-
-    early_stop_2 = EarlyStopping(
-                    monitor="val/obj_metric",
-                    patience=configs["training"]["early_stop_patience"],
-                    verbose=True,
-                    mode="max")
-
-    trainer_2 = pl.Trainer(
-                    deterministic=False,
-                    #accelerator="cpu",  # For running locally,
-                    accelerator="gpu",
-                    #gpus=None,  # For running locally,
-                    gpus=[0],
-                    check_val_every_n_epoch=configs["training"]["validation_interval"],
-                    max_epochs=configs["training"]["max_epoch_2"],
-                    sync_batchnorm=True,
-                    num_sanity_val_steps=0,
-                # resume_from_checkpoint = config.resume_checkpoint,
-                    gradient_clip_val=1.0,
-                    logger=tb_logger,
-                    callbacks=[checkpoint_callback_2, early_stop_2, TQDMProgressBar(refresh_rate=5000)]
-                    )
-    #trainer.max_epochs=configs["training"]["max_epoch_2"]
-    #for a in sed_data_with_unlabelled.train_dataloader():
-        #print(a)
-       # break
-    trainer_2.fit(model, sed_data_with_unlabelled.train_dataloader(), sed_data_with_unlabelled.val_dataloader())
-
-    trainer_2.test(model, sed_data_with_unlabelled.test_dataloader(), ckpt_path="best")
+    trainer.test(model, sed_data.test_dataloader(), ckpt_path="best")
     #h5py_unlabelled_file.close()
     h5py_file.close()
     end_time = time.time()
