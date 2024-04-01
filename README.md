@@ -48,4 +48,7 @@ By default a `pre-commit` is installed via `requirements.txt`.
 The pre-commit hook checks for **Black formatting** on the whole repository. 
 Black ensures that code style is consistent through the whole repository and recipes for better readability. 
 
+###Backbone of code:
+* https://github.com/RetroCirce/HTS-Audio-Transformer
+* https://github.com/DCASE-REPO/DESED_task
 
