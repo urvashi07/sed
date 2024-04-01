@@ -449,7 +449,7 @@ if __name__ == "__main__":
         # resume_from_checkpoint = config.resume_checkpoint,
         gradient_clip_val=1.0,
         logger=tb_logger,
-        callbacks=[checkpoint_callback, early_stop, TQDMProgressBar(refresh_rate=5000)]
+        callbacks=[checkpoint_callback, early_stop, TQDMProgressBar(refresh_rate=1000)]
     )
 
     pretrain_path = ""
@@ -565,7 +565,6 @@ if __name__ == "__main__":
             ckpt = torch.load(pretrain_path)
             model.load_state_dict(ckpt["model"], strict=False)
             
-
 
     trainer.fit(model, sed_data.train_dataloader(), sed_data.val_dataloader())
 

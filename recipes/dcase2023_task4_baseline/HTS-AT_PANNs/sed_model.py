@@ -132,7 +132,6 @@ class SEDWrapper(pl.LightningModule):
         
         self.opt = opt
         self.scheduler = scheduler
-
         #print(self.test_decoded_pred.keys())
         self.student_teacher_model = self.configs["student_teacher_model"]
         if self.student_teacher_model:
@@ -415,16 +414,12 @@ class SEDWrapper(pl.LightningModule):
             self.mAP_val(pred_clip[mask_weak], labels[mask_weak].long())
 
         mask_synth = (
-            torch.tensor(
-                [
-                    str(Path(x).parent)
-                    == str(Path(os.path.join(self.configs["data"]["prefix_folder"], self.configs["data"]["synth_val_folder"])))
-                    for x in  batch["audio_name"]
-                ]
-            )
-            .to(batch["waveform"])
-            .bool()
-        )
+            torch.tensor([str(Path(x).parent)
+                == str(Path(os.path.join(self.configs["data"]["prefix_folder"], 
+                    self.configs["data"]["synth_val_folder"])))
+                    for x in batch["audio_name"]]
+                ).to(batch["waveform"]).bool()
+                                                            )
 
         if torch.any(mask_synth):
             if config.loss_type_frame == "clip_bce":
@@ -1121,7 +1116,7 @@ class SEDWrapper(pl.LightningModule):
 
     def configure_optimizers(self):
         return [self.opt], [self.scheduler]
-
+        
         # Change: SWA, deprecated
         # optimizer = SWA(optimizer, swa_start=10, swa_freq=5)
         def lr_foo(epoch):

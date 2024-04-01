@@ -43,6 +43,9 @@ class SEDDataset_Strong_Embeddings(Dataset):
         self.embedding_file_path = "/work/unegi2s/embeddings/beats/"
         self.embeddings_hdf5_file = os.path.join(self.embedding_file_path, filename)
         self.opened_hdf5_embedding = h5py.File(self.embeddings_hdf5_file, "r")
+        self.filename_to_index = {
+        files.decode('utf-8') + ".wav": idx for idx, files in enumerate(self.opened_hdf5_embedding["filenames"])
+        }
         self.target_sample_rate = target_sample_rate
         self.net_pooling = 1
         self.num_samples = num_samples
@@ -135,8 +138,8 @@ class SEDDataset_Strong_Embeddings(Dataset):
         ##TO DO: filepath is extra: neededx only for validation step for masks ---- should be possible to change
         ##
         ##
-        frame_embeddings_shape = self.opened_hdf5_embedding["frame_embeddings"][0].shape
-        frame_embeddings = np.zeros(frame_embeddings_shape)
+        #frame_embeddings_shape = self.opened_hdf5_embedding["frame_embeddings"][0].shape
+        #frame_embeddings = np.zeros(frame_embeddings_shape)
         filepath = os.path.join(self.data.attrs["folder_path"], filename)
         onset_times = self.data[filename].attrs["onset_times"]
         offset_times = self.data[filename].attrs["offset_times"]
@@ -171,11 +174,8 @@ class SEDDataset_Strong_Embeddings(Dataset):
             labels_frames_arr[frame_start[ind] : frame_end[ind], val] = 1
             labels_arr[val] = 1
 
-        for idx, files in enumerate(self.opened_hdf5_embedding["filenames"]):
-            #print(os.path.basename(filepath))
-            #print(files.decode('utf-8')+".wav")
-            if files.decode('utf-8')+".wav" == os.path.basename(filepath):
-                frame_embeddings = self.opened_hdf5_embedding["frame_embeddings"][idx]
+        idx = self.filename_to_index[os.path.basename(filepath)]
+        frame_embeddings = self.opened_hdf5_embedding["frame_embeddings"][idx]
 
         data_dict = {
                 "audio_name": filepath,

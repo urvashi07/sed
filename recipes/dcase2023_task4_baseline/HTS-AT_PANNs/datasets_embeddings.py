@@ -36,6 +36,9 @@ class SEDDataset_Embeddings(Dataset):
         self.embedding_file_path = "/work/unegi2s/embeddings/beats/"
         self.embeddings_hdf5_file = os.path.join(self.embedding_file_path, filename)
         self.opened_hdf5_embedding = h5py.File(self.embeddings_hdf5_file, "r")
+        self.filename_to_index = {
+        files.decode('utf-8') + ".wav": idx for idx, files in enumerate(self.opened_hdf5_embedding["filenames"])
+        }
         self.device = device
         self.waveform_transforms = False
         if transformation is not None:
@@ -102,8 +105,8 @@ class SEDDataset_Embeddings(Dataset):
             "target": (classes_num,)
         }
         """
-        frame_embeddings_shape = self.opened_hdf5_embedding["frame_embeddings"][0].shape
-        frame_embeddings = np.zeros(frame_embeddings_shape)
+        #frame_embeddings_shape = self.opened_hdf5_embedding["frame_embeddings"][0].shape
+        #frame_embeddings = np.zeros(frame_embeddings_shape)
         filename = list(self.data.keys())[index]
         filepath = os.path.join(self.data.attrs["folder_path"], filename)
         class_labels = self.data[filename].attrs["class_labels"].flatten()
@@ -126,9 +129,8 @@ class SEDDataset_Embeddings(Dataset):
         for ind, val in enumerate(class_labels):
             labels_arr[val] = 1
 
-        for idx, files in enumerate(self.opened_hdf5_embedding["filenames"]):
-            if files.decode('utf-8')+".wav" == os.path.basename(filepath):
-                frame_embeddings = self.opened_hdf5_embedding["frame_embeddings"][idx]
+        idx = self.filename_to_index[os.path.basename(filepath)]
+        frame_embeddings = self.opened_hdf5_embedding["frame_embeddings"][idx]
 
         data_dict = {
             "audio_name": filepath,

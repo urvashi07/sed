@@ -188,7 +188,7 @@ if __name__ == "__main__":
     with open(conf_file_path, "r") as f:
         configs = yaml.safe_load(f)
     
-    base_log_dir = os.path.join("/work", "unegi2s", "pseudo_labelling" ,"epochs_" + str(configs["training"]["max_epoch"]))
+    base_log_dir = os.path.join("/work", "unegi2s" ,"epochs_" + str(configs["training"]["max_epoch"]))
     pred_save_dir = base_log_dir
 
     if not os.path.exists(base_log_dir):
@@ -218,7 +218,8 @@ if __name__ == "__main__":
         if not os.path.exists(pred_save_dir):
             os.mkdir(pred_save_dir)
 
-
+    print("Augment data:" + str(configs["unlabelled"]))
+    print("student- teacher: "+ str(configs["student_teacher_model"]))
     log_dir = os.path.join(base_log_dir, "logs")
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
@@ -565,7 +566,7 @@ if __name__ == "__main__":
     trainer.fit(model, sed_data.train_dataloader(), sed_data.val_dataloader())
 
     # best_model = SEDWrapper.load_from_checkpoint(checkpoint_callback.best_model_path)
-    unlabelled_dataset = UnlabelledDataset(dirpath = os.path.join(configs["data"]["prefix_folder"], configs["data"]["unlabeled_folder"]),
+    """unlabelled_dataset = UnlabelledDataset(dirpath = os.path.join(configs["data"]["prefix_folder"], configs["data"]["unlabeled_folder"]),
                                             num_samples=NUM_SAMPLES, config=configs) 
     #unlabelled_dataset = Subset(unlabelled_dataset, np.arange(8))    
     predict_data_load = predict_data(unlabelled_dataset)
@@ -658,7 +659,8 @@ if __name__ == "__main__":
        # break
     trainer_2.fit(model, sed_data_with_unlabelled.train_dataloader(), sed_data_with_unlabelled.val_dataloader())
 
-    trainer_2.test(model, sed_data_with_unlabelled.test_dataloader(), ckpt_path="best")
+    trainer_2.test(model, sed_data_with_unlabelled.test_dataloader(), ckpt_path="best")"""
+    trainer.test(model, sed_data.test_dataloader(), ckpt_path="best")
     #h5py_unlabelled_file.close()
     h5py_file.close()
     end_time = time.time()
